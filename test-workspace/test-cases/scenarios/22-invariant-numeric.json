@@ -1,0 +1,13 @@
+{
+  "scenario": "S22: Batch size exceeds threshold — invariant_numeric_range_violation → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "systemctl restart payment-gateway",
+    "batch_size": 101
+  },
+  "capability": { "tool": "shell_exec" },
+  "invariants": [
+    { "name": "safe_batch_limit", "maxValues": { "batch_size": 100 }, "minValues": { "batch_size": 1 } }
+  ],
+  "trace": { "traceId": "test-s22", "stepId": "s22" }
+}

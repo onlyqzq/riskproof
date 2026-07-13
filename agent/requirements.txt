@@ -1,0 +1,6 @@
+# Compatibility file for demo users. Packaging and CI use pyproject.toml/uv.lock.
+langgraph>=1.0.10,<2
+langchain-openai>=1.1.14,<2
+langchain-core>=1.2.21,<2
+rich>=13,<15
+python-dotenv>=1.0,<2

@@ -1,0 +1,13 @@
+{
+  "scenario": "S15: Capability expired — capability_expired → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "ls -la"
+  },
+  "capability": {
+    "tool": "shell_exec",
+    "expiresAt": "2025-01-01T00:00:00Z",
+    "description": "Expired capability"
+  },
+  "trace": { "traceId": "test-s15", "stepId": "s15" }
+}

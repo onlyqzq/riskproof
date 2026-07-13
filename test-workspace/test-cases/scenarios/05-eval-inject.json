@@ -1,0 +1,9 @@
+{
+  "scenario": "S05: eval injection — dangerous_shell_pattern → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "eval $(cat /tmp/malicious.sh)"
+  },
+  "capability": { "tool": "shell_exec" },
+  "trace": { "traceId": "test-s05", "stepId": "s05" }
+}

@@ -1,0 +1,9 @@
+{
+  "scenario": "S06: netcat listen — dangerous_shell_pattern → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "nc -l -p 4444 -e /bin/bash"
+  },
+  "capability": { "tool": "shell_exec" },
+  "trace": { "traceId": "test-s06", "stepId": "s06" }
+}

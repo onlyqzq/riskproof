@@ -1,0 +1,64 @@
+{
+  "$schema": "./riskproof.schema.json",
+  "version": "1",
+
+  "internalDomains": [
+    "mycompany.com",
+    "subsidiary.io",
+    "*.internal.corp.com"
+  ],
+
+  "toolRisk": {
+    "shell_exec": "medium",
+    "http_request": "low",
+    "send_email": "medium"
+  },
+
+  "options": {
+    "defaultDecision": "allow"
+  },
+
+  "rules": [
+    {
+      "id": "block_prod_deploy_from_web",
+      "description": "Block any shell command containing deployment keywords when triggered from untrusted web sources",
+      "tool": "shell_exec",
+      "field": "command",
+      "pattern": "(deploy|kubectl|terraform|ansible).*(production|prod)",
+      "decision": "deny",
+      "risk": "critical",
+      "consequence": "Production deployment command detected — blocked by org policy",
+      "enabled": true
+    },
+    {
+      "id": "warn_external_http_large_payload",
+      "description": "Require approval for HTTP requests to external URLs with large payloads",
+      "tool": "http_request",
+      "pattern": "\"body\"\\s*:\\s*\"[^\"]{1000,}\"",
+      "decision": "require_approval",
+      "risk": "high",
+      "consequence": "Large payload being sent to external URL — requires review",
+      "enabled": true
+    },
+    {
+      "id": "block_financial_terms_in_email",
+      "description": "Block emails containing financial terms sent to external recipients",
+      "tool": "send_email",
+      "field": "body",
+      "pattern": "(invoice|payment|wire.transfer|bank.account|SWIFT|IBAN)",
+      "decision": "deny",
+      "risk": "critical",
+      "consequence": "Email contains financial transaction terms — blocked to prevent fraud",
+      "enabled": true
+    },
+    {
+      "id": "require_approval_unknown_tool",
+      "description": "Require approval for any tool not explicitly listed as low-risk",
+      "pattern": ".*",
+      "decision": "require_approval",
+      "risk": "high",
+      "consequence": "Unrecognized tool call requires human review",
+      "enabled": false
+    }
+  ]
+}

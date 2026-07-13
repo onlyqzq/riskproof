@@ -1,0 +1,249 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release and build artifacts
+    runs-on: ubuntu-latest
+    env:
+      UV_FROZEN: "true"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a canonical SemVer tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must be canonical SemVer prefixed with v" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify TypeScript release
+        run: |
+          npm ci
+          npm run check:versions
+          npm run verify
+          npm audit --audit-level=high
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: "0.11.7"
+          enable-cache: true
+          cache-dependency-glob: agent/uv.lock
+      - name: Verify Python release
+        working-directory: agent
+        run: |
+          uv sync --extra dev --python 3.12
+          uv run ruff check src tests demo.py
+          uv run pytest --cov=riskproof_agent --cov-report=term-missing -q
+          uv run python -m compileall -q src tests demo.py
+          uv pip check
+          uv run pip-audit
+
+      - name: Build npm artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/npm
+          npm pack -w packages/riskproof --pack-destination release/npm
+          mkdir -p /tmp/riskproof-release-install
+          npm install --prefix /tmp/riskproof-release-install release/npm/riskproof-*.tgz
+          (
+            cd /tmp/riskproof-release-install
+            node --input-type=module -e "import('riskproof').then((m) => { if (typeof m.evaluate !== 'function') process.exit(1) })"
+          )
+          /tmp/riskproof-release-install/node_modules/.bin/riskproof --help
+
+      - name: Build Python artifacts
+        working-directory: agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv run python -m build
+          uv run twine check dist/*
+          unzip -l dist/*.whl | grep -q 'licenses/LICENSE'
+          unzip -l dist/*.whl | grep -q 'riskproof_agent/py.typed'
+          tar -tzf dist/*.tar.gz | grep -q '/LICENSE$'
+          tar -tzf dist/*.tar.gz | grep -q '/src/riskproof_agent/py.typed$'
+          mkdir -p ../release/python
+          cp dist/* ../release/python/
+
+      - name: Validate and build container release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose config --quiet
+          docker compose -f docker-compose.sidecar.yml config --quiet
+          docker build \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t riskproof:release-check .
+
+      - name: Create release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/checksums
+          (
+            cd release
+            sha256sum npm/* python/* > checksums/SHA256SUMS
+          )
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-dist
+          path: release/npm/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-dist
+          path: release/python/*
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-checksums
+          path: release/checksums/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-npm:
+    name: Publish npm with OIDC
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Require an npm CLI with trusted-publishing support
+        run: npm install --global npm@12.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-dist
+          path: npm-dist
+      - name: Publish verified npm tarball
+        run: npm publish npm-dist/riskproof-*.tgz --access public --provenance
+
+  publish-pypi:
+    name: Publish PyPI with OIDC
+    runs-on: ubuntu-latest
+    needs: publish-npm
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-dist
+          path: python-dist
+      - name: Publish verified Python distributions
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: python-dist
+          attestations: true
+
+  publish-ghcr:
+    name: Publish GHCR image
+    runs-on: ubuntu-latest
+    needs: publish-pypi
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - id: build-vars
+        name: Resolve reproducible image labels
+        shell: bash
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - id: build
+        name: Build and push image, SBOM, and OCI provenance
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.build-vars.outputs.created }}
+          sbom: true
+          provenance: mode=max
+      - name: Create GitHub build provenance attestation
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [publish-npm, publish-pypi, publish-ghcr]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-dist
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-dist
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-checksums
+          path: release-assets
+      - name: Create release from the verified tag
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: release-assets/*

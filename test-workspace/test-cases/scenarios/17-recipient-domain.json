@@ -1,0 +1,14 @@
+{
+  "scenario": "S17: Recipient domain not allowed — capability_recipient_domain_not_allowed → BLOCK",
+  "tool": "send_email",
+  "args": {
+    "to": "attacker@evil.com",
+    "subject": "Test",
+    "body": "Hello"
+  },
+  "capability": {
+    "tool": "send_email",
+    "allowedRecipientDomains": ["company.com", "partner.org"]
+  },
+  "trace": { "traceId": "test-s17", "stepId": "s17" }
+}

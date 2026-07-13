@@ -1,0 +1,10 @@
+{
+  "scenario": "S27: Safe HTTP request to internal — ALLOW",
+  "tool": "http_request",
+  "args": {
+    "url": "https://api.internal.corp/data",
+    "method": "GET"
+  },
+  "capability": { "tool": "http_request" },
+  "trace": { "traceId": "test-s27", "stepId": "s27" }
+}

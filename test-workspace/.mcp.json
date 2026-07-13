@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "riskproof-test-direct": {
+      "command": "npx",
+      "args": [
+        "tsx", "./mock-server/business-tools-server.ts"
+      ]
+    },
+    "riskproof-test-proxied": {
+      "command": "node",
+      "args": [
+        "../packages/riskproof/bin/riskproof.js",
+        "proxy",
+        "--no-interactive",
+        "--proof-dir", ".riskproof/proofs",
+        "--upstream", "npx", "tsx", "./mock-server/business-tools-server.ts"
+      ]
+    }
+  }
+}

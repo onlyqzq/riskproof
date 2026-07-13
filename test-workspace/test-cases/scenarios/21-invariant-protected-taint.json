@@ -1,0 +1,15 @@
+{
+  "scenario": "S21: Protected taint (CUSTOMER_DATA) in email — invariant_protected_taint_modified → BLOCK",
+  "tool": "send_email",
+  "args": {
+    "to": "external@gmail.com",
+    "subject": "客户数据汇总",
+    "body": "客户名单：张三 信用卡：4532-xxxx-xxxx-1234\n李四 消费：¥500,000"
+  },
+  "taints": { "body": ["CUSTOMER_DATA", "FINANCIAL_DATA"] },
+  "capability": { "tool": "send_email" },
+  "invariants": [
+    { "name": "email_dlp", "description": "禁止客户/财务数据外发", "protectedTaints": ["CUSTOMER_DATA", "FINANCIAL_DATA"] }
+  ],
+  "trace": { "traceId": "test-s21", "stepId": "s21" }
+}

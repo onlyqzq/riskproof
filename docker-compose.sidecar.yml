@@ -1,0 +1,104 @@
+# ============================================================================
+# RiskProof — Sidecar Pattern (docker-compose)
+# ============================================================================
+# Demonstrates RiskProof as a sidecar alongside an existing agent service.
+# The agent calls RiskProof's /evaluate endpoint before executing any
+# high-risk tool. RiskProof returns allow/ask_approval/block with full
+# provenance, taint, and policy evidence.
+#
+# Quick start:
+#   docker compose -f docker-compose.sidecar.yml up -d
+#
+# Architecture:
+#
+#   ┌──────────────┐     evaluate      ┌──────────────────┐
+#   │  Your Agent  │ ────────────────▶ │  RiskProof       │
+#   │  (any lang)  │ ◀──────────────── │  (sidecar)       │
+#   └──────┬───────┘   allow/block     └──────────────────┘
+#          │
+#          │ execute (only if allowed)
+#          ▼
+#   ┌──────────────┐
+#   │  Real Tools   │
+#   └──────────────┘
+#
+# The agent service in this example is a placeholder — replace it with
+# your actual agent (LangGraph, CrewAI, AutoGen, custom, etc.).
+# ============================================================================
+
+services:
+  # ── Your Agent Service (placeholder — replace with your own) ─────────────
+  agent:
+    image: your-agent-image:latest  # <-- replace with your agent image
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AGENT_PORT:-8080}:8080"
+    environment:
+      # Point your agent to RiskProof for pre-execution evaluation
+      - RISKPROOF_URL=http://riskproof:9090/evaluate
+      - RISKPROOF_HEALTH_URL=http://riskproof:9090/ready
+    depends_on:
+      riskproof:
+        condition: service_healthy
+    networks:
+      - sidecar-net
+    # Example command — your agent should:
+    # 1. Before executing a tool → POST to RISKPROOF_URL
+    # 2. If action=allow → execute the tool
+    # 3. If action=ask_approval → prompt the user with the risk card
+    # 4. If action=block → reject and log the proof
+    command: ["echo", "Replace with your actual agent entrypoint"]
+
+  # ── RiskProof Sidecar ────────────────────────────────────────────────────
+  riskproof:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: riskproof:latest
+    restart: unless-stopped
+    # No external port exposure — only accessible within the sidecar network.
+    # This keeps RiskProof private to the agent service.
+    expose:
+      - "9090"
+    volumes:
+      # Persistent proof storage for audit trail
+      - riskproof_sidecar_proofs:/app/proofs
+    environment:
+      - RISKPROOF_PROOF_DIR=/app/proofs
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: 1.0
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - sidecar-net
+
+volumes:
+  riskproof_sidecar_proofs:
+    driver: local
+
+networks:
+  # Isolated network for agent <-> sidecar communication.
+  # RiskProof does not need external network access unless your policies
+  # require it (e.g., fetching external blocklists).
+  sidecar-net:
+    driver: bridge
+    # Uncomment to completely isolate from external networks:
+    # internal: true

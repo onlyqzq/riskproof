@@ -1,0 +1,9 @@
+{
+  "scenario": "S01: Safe shell command — expect ALLOW",
+  "tool": "shell_exec",
+  "args": {
+    "command": "ls -la /home/user/documents"
+  },
+  "capability": { "tool": "shell_exec" },
+  "trace": { "traceId": "test-s01", "stepId": "s01" }
+}

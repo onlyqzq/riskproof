@@ -1,0 +1,14 @@
+{
+  "scenario": "S25: Clinical SAE data write — invariant_protected_taint_modified → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "echo 'SAE: hospitalization' >> /opt/ehr/patients/PT-0042.log",
+    "patient_id": "PT-0042"
+  },
+  "taints": { "command": ["PATIENT_DATA"] },
+  "capability": { "tool": "shell_exec" },
+  "invariants": [
+    { "name": "clinical_data_protection", "protectedTaints": ["PATIENT_DATA", "PII"] }
+  ],
+  "trace": { "traceId": "test-s25", "stepId": "s25" }
+}

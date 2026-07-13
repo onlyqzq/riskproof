@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/qzq/riskproof/main/riskproof.schema.json",
+  "title": "RiskProof configuration",
+  "description": "Configuration schema for RiskProof 0.1.x. Runtime validation additionally enforces a 1 MiB file/total-character budget, 10000 nodes, 16 levels of nesting, rejects duplicate or built-in rule IDs, and compiles patterns with RE2-compatible syntax.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Optional editor hint pointing to this schema."
+    },
+    "version": {
+      "const": "1",
+      "description": "Configuration schema version."
+    },
+    "internalDomains": {
+      "type": "array",
+      "description": "Domains considered internal. A leading '*.' matches subdomains.",
+      "items": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    },
+    "toolRisk": {
+      "type": "object",
+      "description": "Per-tool baseline risk floors.",
+      "additionalProperties": false,
+      "properties": {
+        "send_email": { "$ref": "#/$defs/riskLevel" },
+        "http_request": { "$ref": "#/$defs/riskLevel" },
+        "shell_exec": { "$ref": "#/$defs/riskLevel" }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaultDecision": {
+          "enum": ["allow", "deny"],
+          "default": "allow"
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/customRule" }
+    }
+  },
+  "$defs": {
+    "riskLevel": {
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "customRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "decision",
+        "risk",
+        "consequence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,127}$",
+          "not": {
+            "enum": [
+              "invariant_forbidden_tool",
+              "invariant_protected_taint_modified",
+              "invariant_numeric_range_violation",
+              "capability_tool_mismatch",
+              "capability_expired",
+              "capability_forbidden_taint",
+              "capability_recipient_domain_not_allowed",
+              "secret_external_send",
+              "secret_external_http",
+              "dangerous_shell_pattern",
+              "high_risk_tool_requires_capability",
+              "capability_provenance_not_allowed",
+              "customer_data_external_send",
+              "sensitive_data_external_http",
+              "untrusted_influenced_shell",
+              "untrusted_provenance_email_to",
+              "untrusted_provenance_shell",
+              "default_deny_config"
+            ]
+          }
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "tool": {
+          "enum": ["*", "send_email", "http_request", "shell_exec"],
+          "default": "*"
+        },
+        "field": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "pattern": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "RE2-compatible regular expression source. Lookaround and backreferences are unsupported."
+        },
+        "decision": {
+          "enum": ["deny", "require_approval"]
+        },
+        "risk": {
+          "enum": ["high", "critical"]
+        },
+        "consequence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    }
+  }
+}

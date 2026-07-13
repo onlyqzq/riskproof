@@ -1,0 +1,13 @@
+{
+  "scenario": "S16: Forbidden taint — capability_forbidden_taint → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "cat /etc/passwd"
+  },
+  "taints": { "command": ["UNTRUSTED_WEB"] },
+  "capability": {
+    "tool": "shell_exec",
+    "forbiddenTaints": ["UNTRUSTED_WEB", "UNTRUSTED_EMAIL"]
+  },
+  "trace": { "traceId": "test-s16", "stepId": "s16" }
+}

@@ -1,0 +1,9 @@
+{
+  "scenario": "S04: chmod 777 — dangerous_shell_pattern → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "chmod 777 /etc/passwd"
+  },
+  "capability": { "tool": "shell_exec" },
+  "trace": { "traceId": "test-s04", "stepId": "s04" }
+}

@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "riskproof-agent"
+version = "0.1.0"
+description = "Risk-aware approval middleware for AI Agent tool calls — Python agent SDK with LangGraph human-in-the-loop support"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+authors = [
+    {name = "RiskProof Contributors"}
+]
+keywords = [
+    "agent-security",
+    "approval",
+    "mcp",
+    "tool-call",
+    "risk-analysis",
+    "langgraph",
+    "human-in-the-loop",
+    "ai-safety",
+    "middleware",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Security",
+]
+dependencies = [
+    "langgraph>=1.0.10,<2",
+    "langchain-openai>=1.1.14,<2",
+    "langchain-core>=1.2.21,<2",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
+    "rich>=13,<15",
+    "ruff>=0.12,<1",
+    "build>=1.2,<2",
+    "twine>=6,<7",
+    "pip-audit>=2.9,<3",
+]
+langchain = [
+    "langchain>=1.0,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/qzq/riskproof"
+Repository = "https://github.com/qzq/riskproof.git"
+Issues = "https://github.com/qzq/riskproof/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/riskproof_agent"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+    "src/riskproof_agent",
+    "tests",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.coverage.run]
+source = ["riskproof_agent"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70

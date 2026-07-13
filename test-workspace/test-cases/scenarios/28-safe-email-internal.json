@@ -1,0 +1,11 @@
+{
+  "scenario": "S28: Safe email to internal domain — ALLOW (with internalDomains)",
+  "tool": "send_email",
+  "args": {
+    "to": "colleague@company.com",
+    "subject": "Weekly Report",
+    "body": "Here is the weekly status update."
+  },
+  "capability": { "tool": "send_email" },
+  "trace": { "traceId": "test-s28", "stepId": "s28" }
+}

@@ -1,0 +1,8 @@
+{
+  "scenario": "S18: High-risk tool without capability — high_risk_tool_requires_capability → ASK_APPROVAL (PolicyInput mode)",
+  "tool": "shell_exec",
+  "args": {
+    "command": "ls -la"
+  },
+  "trace": { "traceId": "test-s18", "stepId": "s18" }
+}

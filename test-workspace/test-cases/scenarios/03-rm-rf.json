@@ -1,0 +1,9 @@
+{
+  "scenario": "S03: rm -rf / — dangerous_shell_pattern → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "rm -rf / --no-preserve-root"
+  },
+  "capability": { "tool": "shell_exec" },
+  "trace": { "traceId": "test-s03", "stepId": "s03" }
+}

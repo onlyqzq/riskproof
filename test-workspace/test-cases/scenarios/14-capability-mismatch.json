@@ -1,0 +1,9 @@
+{
+  "scenario": "S14: Capability mismatch (send_email cap for shell_exec) — capability_tool_mismatch → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "ls -la"
+  },
+  "capability": { "tool": "send_email", "description": "Email-only capability" },
+  "trace": { "traceId": "test-s14", "stepId": "s14" }
+}

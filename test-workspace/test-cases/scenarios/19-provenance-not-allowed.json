@@ -1,0 +1,16 @@
+{
+  "scenario": "S19: Provenance not in allowed list — capability_provenance_not_allowed → ASK_APPROVAL",
+  "tool": "send_email",
+  "args": {
+    "to": "partner@partner.org",
+    "subject": "Report",
+    "body": "Q3 sales report"
+  },
+  "provenance": { "to": ["untrusted_webpage"] },
+  "capability": {
+    "tool": "send_email",
+    "allowedRecipientDomains": ["partner.org"],
+    "allowedProvenance": ["user_input", "internal_crm"]
+  },
+  "trace": { "traceId": "test-s19", "stepId": "s19" }
+}

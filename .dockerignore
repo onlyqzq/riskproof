@@ -1,0 +1,66 @@
+# ============================================================================
+# RiskProof — .dockerignore
+# ============================================================================
+# Exclude everything that shouldn't be copied into the Docker build context.
+# The Dockerfile only COPYs specific paths from packages/riskproof/, but
+# keeping the context small speeds up builds regardless.
+# ============================================================================
+
+# ── Dependencies ───────────────────────────────────────────────────────────
+node_modules/
+packages/riskproof/node_modules/
+
+# ── Build output (rebuilt inside Docker) ───────────────────────────────────
+dist/
+packages/riskproof/dist/
+
+# ── Runtime state (should not leak into image) ─────────────────────────────
+.riskproof/
+customer-proofs/
+proofs/
+
+# ── Test workspace (mock servers, test cases, smoke scripts) ───────────────
+test-workspace/
+
+# ── Agent (Python, not needed for Node.js image) ───────────────────────────
+agent/
+
+# ── Documentation (not needed at runtime) ──────────────────────────────────
+docs/
+
+# ── IDE and editor files ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Git ────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── CI / Config files not needed in image ──────────────────────────────────
+.github/
+.mcp.example.json
+.gitignore
+
+# ── OS junk ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Env files (secrets) ────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+
+# ── Logs and temporary files ───────────────────────────────────────────────
+*.log
+npm-debug.log*
+tmp/
+temp/
+
+# ── Test coverage and reports ──────────────────────────────────────────────
+coverage/
+**/coverage/
+.nyc_output/

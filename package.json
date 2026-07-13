@@ -1,0 +1,51 @@
+{
+  "name": "riskproof-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Risk-aware approval layer for high-risk AI Agent tool calls — provenance, taint, policy, proof",
+  "keywords": [
+    "agent-security",
+    "approval",
+    "mcp",
+    "tool-call",
+    "risk-analysis",
+    "provenance",
+    "taint-tracking",
+    "policy-engine",
+    "ai-safety"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qzq/riskproof.git"
+  },
+  "author": "RiskProof Contributors",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/riskproof"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "npm test -w packages/riskproof",
+    "test:unit": "npm test -w packages/riskproof",
+    "test:scenarios": "tsx test-workspace/scripts/run-all-tests.ts",
+    "test:scenarios:cli": "tsx test-workspace/scripts/run-all-tests.ts --cli",
+    "test:proxy": "tsx test-workspace/scripts/test-via-proxy.ts",
+    "test:integration": "npm run test:scenarios && npm run test:scenarios:cli && npm run test:proxy",
+    "test:all": "npm run test:unit && npm run test:integration",
+    "build": "npm run build -w packages/riskproof",
+    "typecheck": "npm run typecheck -w packages/riskproof",
+    "lint": "npm run lint -w packages/riskproof",
+    "check:versions": "node scripts/check-versions.mjs",
+    "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "verify": "npm run check:versions && npm run lint && npm run build && npm run test:all",
+    "start": "npm run serve",
+    "demo": "node --import tsx/esm packages/riskproof/src/cli.ts demo",
+    "proxy": "node --import tsx/esm packages/riskproof/src/cli.ts proxy",
+    "serve": "node --import tsx/esm packages/riskproof/src/cli.ts serve",
+    "check": "node --import tsx/esm packages/riskproof/src/cli.ts check"
+  },
+  "packageManager": "npm@10.9.3"
+}

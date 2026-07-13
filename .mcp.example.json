@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "your-business-tools": {
+      "command": "node",
+      "args": ["/path/to/your/mcp-server.js"]
+    },
+    "business-tools-riskproof": {
+      "command": "node",
+      "args": [
+        "./packages/riskproof/bin/riskproof.js",
+        "proxy",
+        "--no-interactive",
+        "--proof-dir", ".riskproof/proofs",
+        "--upstream", "node", "/path/to/your/mcp-server.js"
+      ]
+    }
+  }
+}

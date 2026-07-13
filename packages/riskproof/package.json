@@ -1,0 +1,106 @@
+{
+  "name": "riskproof",
+  "version": "0.1.0",
+  "description": "Risk-aware approval middleware for AI Agent tool calls — provenance tracking, taint analysis, 17 security policies, audit-proof generation. Plugs into any MCP-compatible agent.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "riskproof": "./bin/riskproof.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./proxy-server": {
+      "import": "./dist/proxy-server.js",
+      "types": "./dist/proxy-server.d.ts"
+    },
+    "./http-server": {
+      "import": "./dist/http-server.js",
+      "types": "./dist/http-server.d.ts"
+    },
+    "./fixtures": {
+      "import": "./dist/fixtures.js",
+      "types": "./dist/fixtures.d.ts"
+    },
+    "./explainer": {
+      "import": "./dist/explainer.js",
+      "types": "./dist/explainer.d.ts"
+    },
+    "./proof-store": {
+      "import": "./dist/proof-store.js",
+      "types": "./dist/proof-store.d.ts"
+    },
+    "./schema.json": "./dist/riskproof.schema.json",
+    "./example-config.json": "./dist/riskproof.example.json"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "agent-security",
+    "approval",
+    "mcp",
+    "tool-call",
+    "risk-analysis",
+    "provenance",
+    "taint-tracking",
+    "policy-engine",
+    "ai-safety",
+    "human-in-the-loop",
+    "middleware",
+    "audit-log",
+    "security-policy",
+    "agent-framework"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qzq/riskproof.git",
+    "directory": "packages/riskproof"
+  },
+  "bugs": {
+    "url": "https://github.com/qzq/riskproof/issues"
+  },
+  "homepage": "https://github.com/qzq/riskproof#readme",
+  "author": "RiskProof Contributors",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc && node scripts/copy-assets.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "lint": "npm run typecheck",
+    "verify": "npm run lint && npm run build && npm test",
+    "prepublishOnly": "npm run verify"
+  },
+  "peerDependencies": {
+    "yaml": "^2.9.0"
+  },
+  "peerDependenciesMeta": {
+    "yaml": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "ajv": "^8.20.0",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
+  },
+  "dependencies": {
+    "re2js": "^2.8.6"
+  }
+}

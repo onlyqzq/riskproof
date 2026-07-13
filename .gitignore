@@ -1,0 +1,81 @@
+# ── Dependencies ──────────────────────────────────────────────────────────
+node_modules/
+
+# ── Build output ──────────────────────────────────────────────────────────
+dist/
+*.tsbuildinfo
+*.tgz
+
+# ── Environment & secrets ─────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.*.example
+.envrc
+.direnv/
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+credentials*.json
+service-account*.json
+
+# ── MCP config (root only — user-specific) ───────────────────────────────
+/.mcp.json
+!.mcp.example.json
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+venv/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+*.lcov
+
+# ── RiskProof runtime ─────────────────────────────────────────────────────
+.riskproof/
+customer-proofs/
+proofs/
+
+# ── OS ────────────────────────────────────────────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Patch / merge artifacts ───────────────────────────────────────────────
+*.orig
+*.rej
+
+# ── Internal dev artifacts (not published) ─────────────────────────────────
+PROJECT_AUDIT.md
+TEST_REPORT.md
+OPTIMIZATION_REPORT.md
+RELEASE_READINESS.md
+event.json
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*

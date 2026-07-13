@@ -1,0 +1,12 @@
+{
+  "scenario": "S20: Invariant forbids shell_exec — invariant_forbidden_tool → BLOCK",
+  "tool": "shell_exec",
+  "args": {
+    "command": "ls -la"
+  },
+  "capability": { "tool": "shell_exec" },
+  "invariants": [
+    { "name": "post_audit_lockdown", "description": "安全审计后禁止所有 shell 操作", "forbiddenTools": ["shell_exec"] }
+  ],
+  "trace": { "traceId": "test-s20", "stepId": "s20" }
+}
