@@ -118,10 +118,12 @@ jobs:
           rm -rf dist
           uv run python -m build
           uv run twine check dist/*
-          unzip -l dist/*.whl | grep -q 'licenses/LICENSE'
-          unzip -l dist/*.whl | grep -q 'riskproof_agent/py.typed'
-          tar -tzf dist/*.tar.gz | grep -q '/LICENSE$'
-          tar -tzf dist/*.tar.gz | grep -q '/src/riskproof_agent/py.typed$'
+          whl_listing="$(unzip -l dist/*.whl)"
+          echo "$whl_listing" | grep -q 'licenses/LICENSE'
+          echo "$whl_listing" | grep -q 'riskproof_agent/py.typed'
+          sdist_listing="$(tar -tzf dist/*.tar.gz)"
+          echo "$sdist_listing" | grep -q '/LICENSE$'
+          echo "$sdist_listing" | grep -q '/src/riskproof_agent/py.typed$'
       - name: Install wheel and sdist into a clean environment
         working-directory: agent
         shell: bash
