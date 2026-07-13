@@ -91,6 +91,10 @@
       "optional": true
     }
   },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "4.62.2",
+    "@typescript/typescript-linux-x64": "7.0.2"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^4.1.10",
