@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { evaluate } from "../src/engine.js";
-import { formatCard, formatCompact, formatPolishedCard } from "../src/explainer.js";
+import { evaluate, mergePolicyDecisions } from "../src/engine.js";
+import {
+  buildRiskExplanation,
+  formatCard,
+  formatCompact,
+  formatPolishedCard,
+  RULE_DB,
+  RULE_DB_EN,
+} from "../src/explainer.js";
 
 function secretOutput() {
   return evaluate({
@@ -54,6 +61,80 @@ describe("localized and optionally polished explanations", () => {
       const lines = formatCard(secretOutput(), { locale }).split("\n");
       expect(new Set(lines.map(terminalWidth))).toEqual(new Set([58]));
     }
+  });
+
+  it("builds a redacted UI-neutral causal explanation", () => {
+    const explanation = buildRiskExplanation(secretOutput(), { locale: "en" });
+
+    expect(explanation.version).toBe("1");
+    expect(explanation.recommendation.action).toBe("reject");
+    expect(explanation.riskPath.map(({ kind }) => kind)).toContain("action");
+    expect(explanation.findings.map(({ policyId }) => policyId)).toContain("secret_external_http");
+    expect(JSON.stringify(explanation)).not.toContain("sk-abcdefghijklmnopqrstuvwxyz123456");
+  });
+
+  it("explains tool-identity violations as MCP supply-chain compromise in both locales", () => {
+    const identityRules = [
+      "tool_name_collision",
+      "tool_manifest_mismatch",
+      "tool_descriptor_changed",
+      "unexpected_tool_added",
+    ];
+    for (const id of identityRules) {
+      expect(RULE_DB[id]?.label).toBeTruthy();
+      expect(RULE_DB_EN[id]?.label).toBeTruthy();
+    }
+
+    const output = mergePolicyDecisions(evaluate({
+      tool: "file_read",
+      args: { path: "/tmp/example.txt" },
+      capability: { tool: "file_read" },
+    }), [{
+      decision: "deny",
+      riskLevel: "critical",
+      policy: {
+        id: "tool_descriptor_changed",
+        triggeredArgs: [],
+        evidence: ["descriptor digest changed"],
+        reason: "tool identity changed",
+      },
+    }]);
+
+    expect(buildRiskExplanation(output, { locale: "zh-CN" }).consequences)
+      .toContainEqual(expect.objectContaining({ title: "MCP 工具身份或供应链可能已被替换" }));
+    expect(buildRiskExplanation(output, { locale: "en" }).consequences)
+      .toContainEqual(expect.objectContaining({ title: "MCP tool identity or supply-chain compromise" }));
+  });
+
+  it("renders a matched task contract as authorization evidence rather than a risk finding", () => {
+    const output = mergePolicyDecisions(evaluate({
+      tool: "file_read",
+      args: { path: "/tmp/example.txt" },
+      capability: { tool: "file_read" },
+    }), [{
+      decision: "allow",
+      riskLevel: "low",
+      policy: {
+        id: "task_contract_matched",
+        triggeredArgs: [],
+        evidence: ["task contract sha256=0123456789abcdef"],
+        reason: "host task contract matched",
+      },
+    }]);
+
+    const explanation = buildRiskExplanation(output, { locale: "zh-CN" });
+    expect(explanation.authorizationEvidence)
+      .toContainEqual(expect.objectContaining({ policyId: "task_contract_matched" }));
+    expect(explanation.findings).toEqual([]);
+    expect(explanation.consequences).toEqual([]);
+    expect(explanation.riskPath.map(({ kind }) => kind)).not.toContain("impact");
+
+    const card = formatCard(output, { locale: "zh-CN" });
+    expect(card).toContain("已验证的授权证据");
+    expect(card).not.toContain("批准后的现实后果");
+    const compact = formatCompact(output, { locale: "en" });
+    expect(compact).toContain("VERIFIED AUTHORIZATION EVIDENCE: task_contract_matched");
+    expect(compact).not.toContain("Consequences:");
   });
 });
 

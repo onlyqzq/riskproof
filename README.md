@@ -1,15 +1,29 @@
 # RiskProof
 
-RiskProof is a deterministic, risk-aware approval layer for high-risk AI Agent
-tool calls. Before an Agent sends email, makes an HTTP request, executes a
-command, writes a file, changes a database, or drives a browser, RiskProof combines argument provenance, taint labels,
-capabilities, invariants, and policy matches into an `allow`, `ask_approval`, or
+> **Make every MCP tool call carry evidence before it executes.**
+
+RiskProof is a deterministic enforcement layer for MCP and AI Agent toolchains.
+Before an Agent sends email, makes an HTTP request, reads or writes a file,
+changes a database, drives a browser, or executes a command, RiskProof combines
+argument provenance, taint labels, toolchain capabilities, least-privilege
+authority, invariants, and policy evidence into an `allow`, `ask_approval`, or
 `block` decision and a structured audit proof.
+
+The new MCP risk is not limited to malicious tools: ordinary external-ingestion,
+private-data-access, and network-disclosure tools can be composed into a
+parasitic attack chain. RiskProof puts the security boundary between model
+reasoning and real side effects. A model may make a bad decision; that decision
+should not automatically receive execution authority. See
+[`docs/threat-model.md`](docs/threat-model.md) for the paper evidence boundary,
+coverage matrix, and product roadmap.
+The broader academic lineage, claim-by-claim evidence limits, and defense
+mapping are in [`docs/research-foundations.md`](docs/research-foundations.md).
 
 This checkout is a `0.1.0` release candidate. As of 2026-07-12, the npm package,
 PyPI package, and GHCR image have not been verified as publicly published. Use
 the source and locally built artifacts below until a release owner completes the
-namespace and provenance checks in `RELEASE_READINESS.md`.
+namespace and provenance checks in
+[`docs/publish-checklist.md`](docs/publish-checklist.md).
 
 ## What RiskProof does
 
@@ -20,10 +34,19 @@ Agent tool request
 Runtime validation ── invalid/unknown input ──▶ reject
        │
        ▼
+Complete tool-descriptor identity ── drift/collision ──▶ quarantine
+       │
+       ▼
+Host-held task contract (tool + version + source + expiry + call budget)
+       │
+       ▼
 Automatic MCP provenance + taint + capability + invariant evidence
        │
        ▼
-Deterministic policy engine (19 built-in match rules + config/OPA policies)
+EIT / PAT / NAT capability profiling + bounded cross-tool sequence audit
+       │
+       ▼
+Deterministic policy engine (per-call + toolchain + config/OPA policies)
        │
        ├── allow ───────────────▶ tool may execute
        ├── ask_approval ────────▶ trusted human decision required
@@ -102,6 +125,7 @@ Proofs are written to `.riskproof/proofs/YYYY-MM/` by default.
 | `npm run serve` | Start the localhost HTTP evaluator |
 | `npm run proxy -- --no-interactive --upstream <command...>` | Start the stdio MCP proxy |
 | `npm run demo` | Run deterministic built-in fixtures and save proofs |
+| `npm run demo:research` | Build and run the five-part, no-egress research demonstration |
 | `npm run verify` | Version gate, type/lint checks, build, unit and integration tests |
 | `npm run test:all` | Unit, API scenario, CLI scenario, and MCP integration tests |
 | `npm run benchmark` | Build and run the local reproducible microbenchmark |
@@ -258,6 +282,53 @@ sources such as `webpage_1`, `email_2`, and `customer_data_1`; unmatched values
 are explicitly marked `agent_generated`. Raw indexed context is memory-only and
 is not exposed by diagnostics.
 
+Before a descriptor reaches the planning model, the proxy commits the complete
+JSON object (including name, description, input/output schema, annotations,
+`_meta`, and future fields) to a canonical SHA-256 digest. Same-snapshot name
+collisions, pinned-manifest mismatches, post-baseline additions, and descriptor
+rug pulls enter sticky quarantine and direct calls are denied. Object key order
+does not affect the digest; Unicode strings and array order do. The default is
+process-local TOFU, which detects continuity failures but does **not**
+authenticate the first server. High-assurance hosts should inject an
+operator-approved pinned `ToolIdentityGuard`. A descriptor digest proves what
+was advertised, not that the backend implementation behaves honestly.
+
+An optional host-held `TaskAuthorizationGuard` narrows execution further. Its
+contract binds an exact upstream tool name, optional descriptor digest,
+permitted provenance IDs, expiry, and global/per-tool call budgets. Pending
+calls reserve budget before dispatch, failed MCP results release it, and only
+successful calls consume it. The contract is never read from model-controlled
+`tools/call` metadata and tool output cannot expand it. The positive
+`task_contract_matched` evidence binds the evaluation proof to the contract and
+explicitly states that this is a structural authorization check, not a semantic
+task-alignment oracle.
+
+The CLI can load a trusted JSON contract:
+
+```bash
+riskproof proxy \
+  --task-contract examples/task-contract.example.json \
+  --no-interactive \
+  --upstream your-mcp-server
+```
+
+The zero descriptor digests in that example deliberately fail closed; replace
+them with `digestToolDescriptor(fullToolObject)` values from an
+operator-reviewed manifest. Programmatic hosts can preload a shared
+`ContextTracker` with an authenticated `trusted_user` value and pass it as
+`contextTrackerInstance`; the returned provenance ID can then appear in
+`allowedProvenance`. Without such host authentication, `agent_generated` means
+unknown lineage and must not be presented as proof of user authorization.
+
+The proxy also conservatively profiles tools as external ingestion (EIT),
+private data access (PAT), and external disclosure (NAT), then recognizes an
+EIT→PAT→NAT path in a bounded metadata-only history. EIT→PAT requires review;
+a complete capability path is critical; and a final outbound argument carrying
+private-result provenance or a sensitive taint is blocked. A single tool able
+to span all three phases also receives critical review. Only calls actually
+forwarded and successfully returned become completed events; raw results never
+enter the sequence history.
+
 For summaries or rewrites that no longer contain an exact source substring,
 trusted integrations can add monotonic argument flow edges:
 
@@ -270,8 +341,11 @@ trusted integrations can add monotonic argument flow edges:
 }
 ```
 
-Flows only add inherited source/taint evidence; they cannot clear existing
-evidence. MCP clients may supply the same array as `_meta.riskproof_flows`.
+Flows only add inherited security-relevant source/taint evidence and cannot
+lower risk; the `agent_generated` placeholder may be replaced when stronger
+provenance arrives. MCP clients may supply the same array as
+`_meta.riskproof_flows`; fabricated edges can only tighten a decision, never
+grant authority.
 Unclassified or unauthorized calls require approval rather than receiving a
 name-based automatic capability.
 
@@ -290,6 +364,21 @@ Python: allow_unsigned_client_decisions=True
 
 Both switches are required. This is not a signed approval token and is not safe
 over an untrusted or multi-tenant transport. See `SECURITY.md`.
+
+An upstream MCP process inherits only a minimal launch environment (`PATH`,
+`HOME`, temporary-directory and locale variables, plus required Windows launch
+variables). AWS, GitHub, npm, database, SSH-agent, and unknown parent credentials
+are not passed implicitly; business variables must be configured explicitly.
+Never register both the raw upstream server and its RiskProof wrapper in the
+same MCP host configuration, because that creates a direct bypass. Run unknown
+or low-trust servers in a separate sandbox with read-only/minimal mounts and
+controlled egress.
+
+The stdio CLI's sequence state belongs to one proxy process. Independent proxy
+processes do not yet share session provenance, so this version does not claim
+complete cross-server MCP-UPD prevention. A programmatic host can share the
+exported `ToolchainGuard`; the production roadmap is a host-level gateway or a
+shared session ledger.
 
 ## Python SDK
 
@@ -324,7 +413,7 @@ production key for a demo. The automated suite never invokes a real LLM.
 
 ## Built-in policy coverage
 
-The 19 built-in match rules cover:
+Built-in per-call and toolchain policies cover:
 
 - secret/API-key external email and HTTP exfiltration;
 - customer/PII/source-code/financial/patient data sent to external sinks;
@@ -335,7 +424,12 @@ The 19 built-in match rules cover:
 - untrusted recipient and shell provenance;
 - missing, expired, mismatched, or over-broad capabilities;
 - recipient and provenance allowlists;
-- forbidden tools, protected taints, and numeric safety invariants.
+- forbidden tools, protected taints, and numeric safety invariants;
+- cloud metadata/link-local SSRF targets and protected system/persistence writes;
+- complete tool-descriptor continuity, collisions, and pinned manifest checks;
+- optional task-scoped tool/version/source/expiry/call-budget authorization;
+- external-ingestion → private-access → external-disclosure transitions and
+  confirmed provenance-bearing exfiltration paths.
 
 `options.defaultDecision="deny"` adds a fallback denial when no match rule
 fires. Shell detection is defense-in-depth, not a complete parser or sandbox.
@@ -413,7 +507,7 @@ docker compose up -d
 ```
 
 The sidecar Compose file contains a placeholder `your-agent-image`; replace it
-before attempting `up`. See `docs/docker.md` and `RELEASE_READINESS.md` for
+before attempting `up`. See `docs/docker.md` and `docs/publish-checklist.md` for
 backup, smoke, and rollback instructions.
 
 ## Project structure
@@ -425,10 +519,10 @@ test-workspace/           28 policy scenarios and mock MCP integration server
 scripts/                  version gate, benchmark, OPA and Docker release smokes
 .github/workflows/        CI and gated release preparation
 docs/                     architecture, Docker and publishing guidance
-PROJECT_AUDIT.md          architecture review and risk register
-TEST_REPORT.md            executed commands, results and coverage
-OPTIMIZATION_REPORT.md    performance/stability evidence
-RELEASE_READINESS.md      deployment, smoke, monitoring and rollback runbook
+docs/threat-model.md      threat model, paper mapping, coverage and roadmap
+docs/publish-checklist.md release, artifact provenance, and launch checks
+docs/docker.md            container build, smoke, and deployment boundaries
+SECURITY.md               trust boundaries, reporting, and known limitations
 ```
 
 ## Development checks
@@ -469,6 +563,14 @@ publication remain release-owner tasks. Build and test local artifacts first.
 
 No. Keep it behind a trusted sidecar boundary and use a real signed approval
 service before multi-user or remote deployment.
+
+**Does the task contract prove that the Agent is serving the user's goal?**
+
+No. It deterministically constrains an action to host-approved tools, versions,
+sources, time, and budgets. `objectiveDigest` records which trusted objective
+was bound, but RiskProof does not claim to implement a reliable semantic
+trajectory/action oracle. See the four-property coverage discussion in
+[`docs/research-foundations.md`](docs/research-foundations.md).
 
 **Can it infer complete provenance automatically?**
 

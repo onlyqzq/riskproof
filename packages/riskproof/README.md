@@ -1,8 +1,9 @@
 # riskproof
 
-Deterministic risk evaluation and approval proofs for AI Agent tool calls.
-RiskProof validates and evaluates email, HTTP, shell, file, database, and
-browser tool requests before a real integration executes them.
+Deterministic execution control and audit proofs for MCP/AI Agent toolchains.
+RiskProof validates email, HTTP, shell, file, database, and browser requests,
+tracks bounded provenance and cross-tool capability transitions, and decides
+before a real integration executes them.
 
 Requires Node.js 22 or newer.
 
@@ -30,8 +31,10 @@ console.log(result.proof.proofId);
 ```
 
 Unknown JSON-facing tools and malformed arguments fail closed. The engine has
-19 built-in match rules plus configurable default-deny and OPA/Rego policies. It does not
-execute email, HTTP, or shell actions.
+21 per-call rules, complete tool-descriptor identity commitments, an optional
+host-held task contract, an EIT/PAT/NAT toolchain guard, configurable
+default-deny, and OPA/Rego policies. It does not execute email, HTTP, or shell
+actions.
 
 ## CLI
 
@@ -40,6 +43,7 @@ riskproof --help
 riskproof check event.json --pretty
 riskproof serve --host 127.0.0.1 --port 9090
 riskproof proxy --no-interactive --upstream <mcp-server-command...>
+riskproof proxy --task-contract trusted-task.json --no-interactive --upstream <mcp-server-command...>
 riskproof check event.json --opa-policy compiled-policy.wasm
 riskproof validate-config riskproof.json
 ```
@@ -97,6 +101,26 @@ It builds a bounded in-memory index from MCP resources, prompts, and tool
 results; later argument values receive semantic provenance IDs by exact
 substring matching, with `agent_generated` used for unmatched values.
 
+The complete tool descriptor is canonically hashed before it reaches the
+planning model. Name collisions, pinned-manifest mismatches, late additions,
+and descriptor rug pulls are sticky-quarantined. Default TOFU detects
+continuity only; it does not authenticate the first server or prove backend
+behavior. `TaskAuthorizationGuard` can additionally bind an exact tool,
+descriptor digest, allowed host provenance, expiry, and global/per-tool call
+budgets. Its `objectiveDigest` is a task binding, not semantic proof of task
+alignment.
+
+Successful calls are also recorded in a bounded metadata-only sequence monitor.
+It requires review for external-ingestion → private-access transitions, raises a
+complete ingestion → private-access → disclosure path to critical, and blocks a
+final outbound call when its arguments carry private-result provenance or
+sensitive taints. Raw tool results are not stored in the sequence history.
+
+The CLI state covers one proxy process. Cross-server deployments need a shared
+host/session ledger; custom hosts can share the exported `ToolchainGuard`.
+Upstream processes receive a minimal environment allowlist, so credentials must
+be passed explicitly. Do not expose a raw upstream server beside its wrapper.
+
 Unsigned `_meta.riskproof_user_decision` is rejected by default. The
 `--allow-client-decisions` switch is only for an explicitly trusted, local MVP
 process chain and is not a signed human-approval token.
@@ -122,8 +146,9 @@ npm run test:opa # requires the OPA CLI; compiles and executes the example Rego 
 npm run test:coverage -w packages/riskproof
 ```
 
-See the main repository `README.md`, `SECURITY.md`, `TEST_REPORT.md`, and
-`RELEASE_READINESS.md` for architecture, trust boundaries, exact validation
-evidence, deployment, and rollback guidance.
+See the main repository `README.md`, `SECURITY.md`, `docs/threat-model.md`,
+`docs/research-foundations.md`, `docs/docker.md`, and
+`docs/publish-checklist.md` for architecture, evidence boundaries, deployment,
+and rollback guidance.
 
 License: Apache-2.0.

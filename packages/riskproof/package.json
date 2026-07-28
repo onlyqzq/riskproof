@@ -1,7 +1,7 @@
 {
   "name": "riskproof",
   "version": "0.1.0",
-  "description": "Risk-aware approval middleware for AI Agent tool calls — automatic provenance, taint analysis, 19 security policies, OPA/Rego, and protected audit proofs.",
+  "description": "Deterministic MCP/AI Agent enforcement — tool identity, task contracts, provenance, 21 per-call policies, toolchain controls, OPA/Rego, and audit proofs.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -40,6 +40,26 @@
     "./opa-policy": {
       "import": "./dist/opa-policy.js",
       "types": "./dist/opa-policy.d.ts"
+    },
+    "./tool-manifest": {
+      "import": "./dist/tool-manifest.js",
+      "types": "./dist/tool-manifest.d.ts"
+    },
+    "./tool-selection-guard": {
+      "import": "./dist/tool-selection-guard.js",
+      "types": "./dist/tool-selection-guard.d.ts"
+    },
+    "./approval-ticket": {
+      "import": "./dist/approval-ticket.js",
+      "types": "./dist/approval-ticket.d.ts"
+    },
+    "./persistent-task-ledger": {
+      "import": "./dist/persistent-task-ledger.js",
+      "types": "./dist/persistent-task-ledger.d.ts"
+    },
+    "./execution-receipt": {
+      "import": "./dist/execution-receipt.js",
+      "types": "./dist/execution-receipt.d.ts"
     },
     "./schema.json": "./dist/riskproof.schema.json",
     "./example-config.json": "./dist/riskproof.example.json"

@@ -59,7 +59,7 @@ ARG BUILD_DATE="unknown"
 
 # Metadata
 LABEL org.opencontainers.image.title="RiskProof"
-LABEL org.opencontainers.image.description="Risk-aware approval middleware for AI Agent tool calls"
+LABEL org.opencontainers.image.description="Deterministic enforcement and evidence layer for MCP and AI Agent toolchains"
 LABEL org.opencontainers.image.url="https://github.com/qzq/riskproof"
 LABEL org.opencontainers.image.source="https://github.com/qzq/riskproof"
 LABEL org.opencontainers.image.licenses="Apache-2.0"

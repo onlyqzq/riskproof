@@ -16,6 +16,7 @@
 // ============================================================================
 
 import { createInterface } from "node:readline";
+import { writeFileSync } from "node:fs";
 
 // ─── 工具定义（业务化命名，绕过 Claude 敏感词检测）──────────────────────────
 
@@ -347,6 +348,25 @@ const MOCK_DB: Record<string, unknown> = {
 };
 let toolsCallCount = 0;
 let riskproofEvaluateCount = 0;
+const TEST_STATS_FLAG = "--riskproof-test-stats-file";
+const testStatsFlagIndex = process.argv.indexOf(TEST_STATS_FLAG);
+const testStatsPath = testStatsFlagIndex >= 0 ? process.argv[testStatsFlagIndex + 1] : undefined;
+
+function visibleUpstreamArgs(): string[] {
+  return process.argv.slice(2).filter((_, index, args) => {
+    const absoluteIndex = index + 2;
+    return args[index] !== TEST_STATS_FLAG && absoluteIndex !== testStatsFlagIndex + 1;
+  });
+}
+
+function writeTestStats(): void {
+  if (!testStatsPath) return;
+  writeFileSync(testStatsPath, JSON.stringify({
+    toolsCallCount,
+    riskproofEvaluateCount,
+    upstreamArgs: visibleUpstreamArgs(),
+  }));
+}
 
 // ─── JSON-RPC 处理 ──────────────────────────────────────────────────────────
 
@@ -486,6 +506,7 @@ function handleToolsCall(name: string, args: Record<string, unknown>): unknown {
 const PORT = parseInt(process.env.MOCK_MCP_PORT || "13201", 10);
 
 function startServer() {
+  writeTestStats();
   // 使用 stdin/stdout JSON-RPC 模式（MCP 标准协议）
   const rl = createInterface({
     input: process.stdin,
@@ -511,7 +532,10 @@ function startServer() {
     }
 
     const { id, method, params } = msg;
-    if (method === "riskproof/evaluate") riskproofEvaluateCount += 1;
+    if (method === "riskproof/evaluate") {
+      riskproofEvaluateCount += 1;
+      writeTestStats();
+    }
 
     try {
       let result: unknown;
@@ -531,6 +555,7 @@ function startServer() {
 
         case "tools/call": {
           toolsCallCount += 1;
+          writeTestStats();
           const toolName = params?.name as string;
           const toolArgs = (params?.arguments || {}) as Record<string, unknown>;
           result = {
@@ -543,7 +568,7 @@ function startServer() {
           result = {
             toolsCallCount,
             riskproofEvaluateCount,
-            upstreamArgs: process.argv.slice(2),
+            upstreamArgs: visibleUpstreamArgs(),
           };
           break;
 

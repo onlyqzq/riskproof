@@ -9,6 +9,7 @@
 //   demo [--proof-dir <dir>]          Run all fixtures, generate proof + report
 // ============================================================================
 
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { evaluate } from "./engine.js";
@@ -16,6 +17,33 @@ import { evaluateWithOpa, OpaPolicyEngine } from "./opa-policy.js";
 import { loadConfig } from "./config.js";
 import type { RiskProofConfig } from "./config.js";
 import { McpProxyServer } from "./proxy-server.js";
+import {
+  TaskAuthorizationGuard,
+  type TaskAuthorizationContract,
+} from "./task-authorization-guard.js";
+import {
+  PinnedToolManifestVerifier,
+  parsePinnedToolManifest,
+  serializeSignedPinnedToolManifestEnvelope,
+  signPinnedToolManifest,
+  type PinnedToolManifestV1,
+} from "./tool-manifest.js";
+import { ToolSelectionGuard, type ToolSelectionPolicy } from "./tool-selection-guard.js";
+import {
+  ApprovalTicketVerifier,
+  InMemoryApprovalTicketReplayStore,
+  StaticApprovalTicketTrustStore,
+  issueApprovalTicket,
+  serializeApprovalTicket,
+  type ApprovalTicketBinding,
+} from "./approval-ticket.js";
+import {
+  PersistentTaskLedger,
+  type PersistentLedgerBudget,
+  type PersistentLedgerScope,
+} from "./persistent-task-ledger.js";
+import { PersistentLedgerApprovalReplayStore } from "./ledger-approval-replay-store.js";
+import { ExecutionReceiptStore } from "./execution-receipt.js";
 import { startHttpServer } from "./http-server.js";
 import { ProofStore, type ProofStoreOptions } from "./proof-store.js";
 import { ALL_FIXTURES } from "./fixtures.js";
@@ -28,9 +56,12 @@ import type { Fixture } from "./fixtures.js";
 function help(exitCode = 0): void {
   console.log(`Usage:
   riskproof check <event-json-file> [--pretty] [--config|-c <path>] [--opa-policy <policy.wasm>]
-  riskproof proxy --upstream <command...> [--proof-dir <path>] [--no-interactive] [--allow-client-decisions] [--config|-c <path>] [--opa-policy <policy.wasm>]
+  riskproof proxy --upstream <command...> [--proof-dir <path>] [--task-contract <path>] [--no-interactive] [--allow-client-decisions] [--config|-c <path>] [--opa-policy <policy.wasm>]
   riskproof serve [--port <n>] [--host <host>] [--proof-dir <path>] [--cors-origin <origin>] [--trust-request-context] [--config|-c <path>] [--opa-policy <policy.wasm>]
   riskproof demo [--proof-dir <path>] [--config|-c <path>] [--opa-policy <policy.wasm>]
+  riskproof approval issue --binding <binding.json> --private-key <ed25519.pem> --key-id <id> [--ttl-ms <ms>] [--out <ticket.json>]
+  riskproof manifest sign --manifest <manifest.json> --private-key <ed25519.pem> --key-id <id> [--out <envelope.json>]
+  riskproof manifest verify --manifest <envelope.json> --public-key <ed25519.pem> --key-id <id>
   riskproof validate-config <config-file>
 
 Global options:
@@ -43,8 +74,18 @@ Options (check):
 Options (proxy):
   --upstream      Command to spawn upstream MCP server (required)
   --proof-dir     Proof store directory (default: .riskproof/proofs)
+  --task-contract Trusted host-side task authorization contract (.json)
   --no-interactive Auto-deny ask_approval decisions
   --allow-client-decisions Trust unsigned approve/reject metadata from a trusted client (unsafe on untrusted transports)
+  --provider-id / --server-id  Operator-defined ToolKey namespace (required by strict identity/evidence controls)
+  --tool-manifest Signed pinned manifest envelope
+  --manifest-public-key / --manifest-key-id  Ed25519 manifest trust anchor
+  --selection-policy Operator-approved candidate/capability policy (.json)
+  --execution-context Trusted tenant/user/task/session/trace/principal context (.json)
+  --ledger-dir / --ledger-budget Durable cross-process budget and replay state
+  --receipt-dir  Decision→dispatch→result receipt directory
+  --receipt-signing-key / --receipt-key-id  Optional Ed25519 event signing key
+  --approval-public-key / --approval-key-id / --approval-binding  Exact signed-ticket verification
   --              Within --upstream, pass remaining arguments verbatim (use for flags that collide with proxy options)
 
 Options (serve):
@@ -126,6 +167,8 @@ async function main(argv: string[]): Promise<void> {
       case "proxy": await runProxy(filtered, config, opaPolicies, proofStoreOptions); return;
       case "serve": runServe(filtered, config, opaPolicies, proofStoreOptions); return;
       case "demo": runDemo(filtered, config, opaPolicies, proofStoreOptions); return;
+      case "approval": runApprovalCommand(filtered); return;
+      case "manifest": runManifestCommand(filtered); return;
       case "validate-config": runValidateConfig(filtered); return;
       default:
         console.error(`Unknown command: ${cmd}`);
@@ -231,10 +274,34 @@ async function runProxy(
   let proofDir: string | undefined = process.env.RISKPROOF_PROOF_DIR || undefined;
   let interactive = true;
   let allowClientDecisions = false;
+  let taskContractPath: string | undefined;
+  let providerId: string | undefined;
+  let serverId: string | undefined;
+  let toolManifestPath: string | undefined;
+  let manifestPublicKeyPath: string | undefined;
+  let manifestKeyId: string | undefined;
+  let selectionPolicyPath: string | undefined;
+  let executionContextPath: string | undefined;
+  let ledgerDir: string | undefined;
+  let ledgerBudgetPath: string | undefined;
+  let receiptDir: string | undefined;
+  let receiptSigningKeyPath: string | undefined;
+  let receiptKeyId: string | undefined;
+  let approvalPublicKeyPath: string | undefined;
+  let approvalKeyId: string | undefined;
+  let approvalBindingPath: string | undefined;
+
+  const proxyFlags = new Set([
+    "--proof-dir", "--task-contract", "--no-interactive", "--allow-client-decisions",
+    "--provider-id", "--server-id", "--tool-manifest", "--manifest-public-key",
+    "--manifest-key-id", "--selection-policy", "--execution-context", "--ledger-dir",
+    "--ledger-budget", "--receipt-dir", "--receipt-signing-key", "--receipt-key-id",
+    "--approval-public-key", "--approval-key-id", "--approval-binding",
+  ]);
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--upstream") {
-      while (i + 1 < args.length && !["--proof-dir", "--no-interactive", "--allow-client-decisions"].includes(args[i + 1])) {
+      while (i + 1 < args.length && !proxyFlags.has(args[i + 1])) {
         if (args[i + 1] === "--") {
           i += 1;
           while (i + 1 < args.length) upstream.push(args[++i]);
@@ -244,6 +311,38 @@ async function runProxy(
       }
     } else if (args[i] === "--proof-dir" && i + 1 < args.length) {
       proofDir = args[++i];
+    } else if (args[i] === "--task-contract" && i + 1 < args.length) {
+      taskContractPath = args[++i];
+    } else if (args[i] === "--provider-id" && i + 1 < args.length) {
+      providerId = args[++i];
+    } else if (args[i] === "--server-id" && i + 1 < args.length) {
+      serverId = args[++i];
+    } else if (args[i] === "--tool-manifest" && i + 1 < args.length) {
+      toolManifestPath = args[++i];
+    } else if (args[i] === "--manifest-public-key" && i + 1 < args.length) {
+      manifestPublicKeyPath = args[++i];
+    } else if (args[i] === "--manifest-key-id" && i + 1 < args.length) {
+      manifestKeyId = args[++i];
+    } else if (args[i] === "--selection-policy" && i + 1 < args.length) {
+      selectionPolicyPath = args[++i];
+    } else if (args[i] === "--execution-context" && i + 1 < args.length) {
+      executionContextPath = args[++i];
+    } else if (args[i] === "--ledger-dir" && i + 1 < args.length) {
+      ledgerDir = args[++i];
+    } else if (args[i] === "--ledger-budget" && i + 1 < args.length) {
+      ledgerBudgetPath = args[++i];
+    } else if (args[i] === "--receipt-dir" && i + 1 < args.length) {
+      receiptDir = args[++i];
+    } else if (args[i] === "--receipt-signing-key" && i + 1 < args.length) {
+      receiptSigningKeyPath = args[++i];
+    } else if (args[i] === "--receipt-key-id" && i + 1 < args.length) {
+      receiptKeyId = args[++i];
+    } else if (args[i] === "--approval-public-key" && i + 1 < args.length) {
+      approvalPublicKeyPath = args[++i];
+    } else if (args[i] === "--approval-key-id" && i + 1 < args.length) {
+      approvalKeyId = args[++i];
+    } else if (args[i] === "--approval-binding" && i + 1 < args.length) {
+      approvalBindingPath = args[++i];
     } else if (args[i] === "--no-interactive") {
       interactive = false;
     } else if (args[i] === "--allow-client-decisions") {
@@ -254,8 +353,113 @@ async function runProxy(
   }
 
   if (upstream.length === 0) {
-    console.error("Usage: riskproof proxy --upstream <command...> [--proof-dir <path>] [--no-interactive] [--config <path>]");
+    console.error("Usage: riskproof proxy --upstream <command...> [security options]");
     process.exit(1);
+  }
+
+  if ((providerId === undefined) !== (serverId === undefined)) {
+    throw new Error("--provider-id and --server-id must be configured together");
+  }
+  const toolNamespace = providerId && serverId ? { providerId, serverId } : undefined;
+  const executionContext = executionContextPath
+    ? parseTrustedExecutionContext(readJsonFile(executionContextPath, "execution context"))
+    : undefined;
+
+  let taskAuthorizationGuard: TaskAuthorizationGuard | undefined;
+  if (taskContractPath) {
+    let rawContract: unknown;
+    try {
+      rawContract = JSON.parse(readFileSync(resolve(taskContractPath), "utf-8"));
+    } catch (error) {
+      throw new Error(`Failed to read task contract: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    taskAuthorizationGuard = new TaskAuthorizationGuard(
+      rawContract as TaskAuthorizationContract,
+    );
+    if (executionContext && rawContract && isRecord(rawContract) &&
+        rawContract.taskId !== executionContext.taskId) {
+      throw new Error("execution context taskId does not match the trusted task contract");
+    }
+  }
+
+  let verifiedToolManifest;
+  if (toolManifestPath || manifestPublicKeyPath || manifestKeyId) {
+    if (!toolManifestPath || !manifestPublicKeyPath || !manifestKeyId || !toolNamespace) {
+      throw new Error(
+        "--tool-manifest, --manifest-public-key, --manifest-key-id, --provider-id and --server-id are required together",
+      );
+    }
+    const verifier = new PinnedToolManifestVerifier([{
+      algorithm: "Ed25519",
+      keyId: manifestKeyId,
+      publicKey: createPublicKey(readFileSync(resolve(manifestPublicKeyPath), "utf-8")),
+    }]);
+    const verification = verifier.verify(readFileSync(resolve(toolManifestPath), "utf-8"));
+    if (!verification.verified) {
+      throw new Error(`Signed tool manifest denied: ${verification.diagnostic.code}`);
+    }
+    verifiedToolManifest = verification.value;
+  }
+
+  const toolSelectionGuard = selectionPolicyPath
+    ? new ToolSelectionGuard(readJsonFile(selectionPolicyPath, "selection policy") as ToolSelectionPolicy)
+    : undefined;
+
+  if (ledgerBudgetPath && !ledgerDir) throw new Error("--ledger-budget requires --ledger-dir");
+  let persistentTaskLedger: PersistentTaskLedger | undefined;
+  if (ledgerDir) {
+    if (!executionContext) throw new Error("--ledger-dir requires --execution-context");
+    const budget = ledgerBudgetPath
+      ? readJsonFile(ledgerBudgetPath, "ledger budget") as PersistentLedgerBudget
+      : {};
+    persistentTaskLedger = new PersistentTaskLedger(
+      executionContext,
+      budget,
+      { baseDir: resolve(ledgerDir) },
+    );
+  }
+
+  if ((receiptSigningKeyPath === undefined) !== (receiptKeyId === undefined)) {
+    throw new Error("--receipt-signing-key and --receipt-key-id must be configured together");
+  }
+  let executionReceiptStore: ExecutionReceiptStore | undefined;
+  if (receiptDir || receiptSigningKeyPath || receiptKeyId) {
+    if (!receiptDir || !executionContext || !toolNamespace) {
+      throw new Error("--receipt-dir requires --execution-context, --provider-id and --server-id");
+    }
+    executionReceiptStore = new ExecutionReceiptStore({
+      baseDir: resolve(receiptDir),
+      ...(receiptSigningKeyPath && receiptKeyId
+        ? {
+          signing: {
+            keyId: receiptKeyId,
+            privateKey: createPrivateKey(readFileSync(resolve(receiptSigningKeyPath), "utf-8")),
+          },
+          requireSignature: true,
+        }
+        : {}),
+    });
+  }
+
+  const approvalConfigured = [approvalPublicKeyPath, approvalKeyId, approvalBindingPath]
+    .filter((value) => value !== undefined).length;
+  let approvalTicketVerifier: ApprovalTicketVerifier | undefined;
+  let approvalBinding: ApprovalTicketBinding | undefined;
+  if (approvalConfigured > 0) {
+    if (approvalConfigured !== 3 || !approvalPublicKeyPath || !approvalKeyId || !approvalBindingPath || !toolNamespace) {
+      throw new Error(
+        "--approval-public-key, --approval-key-id, --approval-binding, --provider-id and --server-id are required together",
+      );
+    }
+    approvalBinding = readJsonFile(approvalBindingPath, "approval binding") as ApprovalTicketBinding;
+    approvalTicketVerifier = new ApprovalTicketVerifier({
+      trustStore: new StaticApprovalTicketTrustStore({
+        [approvalKeyId]: createPublicKey(readFileSync(resolve(approvalPublicKeyPath), "utf-8")),
+      }),
+      replayStore: persistentTaskLedger
+        ? new PersistentLedgerApprovalReplayStore(persistentTaskLedger)
+        : new InMemoryApprovalTicketReplayStore(),
+    });
   }
 
   const server = new McpProxyServer({
@@ -266,6 +470,37 @@ async function runProxy(
     allowClientDecisions,
     opaPolicies,
     proofStoreOptions,
+    taskAuthorizationGuard,
+    ...(toolNamespace ? { toolNamespace } : {}),
+    ...(verifiedToolManifest ? { verifiedToolManifest } : {}),
+    ...(toolSelectionGuard
+      ? {
+        toolSelectionGuard,
+        selectionResolver: ({ mappedCapability }: { mappedCapability: string }) => ({
+          requestedCapability: mappedCapability,
+          reason: "capability_match" as const,
+        }),
+      }
+      : {}),
+    ...(approvalTicketVerifier && approvalBinding
+      ? {
+        approvalTicketVerifier,
+        approvalBindingResolver: () => approvalBinding as ApprovalTicketBinding,
+      }
+      : {}),
+    ...(persistentTaskLedger ? { persistentTaskLedger } : {}),
+    ...(executionReceiptStore && executionContext
+      ? {
+        executionReceiptStore,
+        executionScope: {
+          tenantId: executionContext.tenantId,
+          userId: executionContext.userId,
+          taskId: executionContext.taskId,
+          sessionId: executionContext.sessionId,
+          traceId: executionContext.traceId,
+        },
+      }
+      : {}),
   });
   const shutdown = () => server.stop();
   process.once("SIGINT", shutdown);
@@ -331,6 +566,97 @@ function runServe(
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+// ─── signed approval / manifest operator commands ─────────────────────────────
+
+function runApprovalCommand(args: string[]): void {
+  if (args[0] !== "issue") {
+    throw new Error("Usage: riskproof approval issue --binding <json> --private-key <pem> --key-id <id> [--ttl-ms <ms>] [--out <json>]");
+  }
+  let bindingPath: string | undefined;
+  let privateKeyPath: string | undefined;
+  let keyId: string | undefined;
+  let outputPath: string | undefined;
+  let ttlMs: number | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const option = args[index];
+    if (option === "--binding" && index + 1 < args.length) bindingPath = args[++index];
+    else if (option === "--private-key" && index + 1 < args.length) privateKeyPath = args[++index];
+    else if (option === "--key-id" && index + 1 < args.length) keyId = args[++index];
+    else if (option === "--ttl-ms" && index + 1 < args.length) {
+      ttlMs = readPositiveInteger(args[++index], "--ttl-ms");
+    } else if (option === "--out" && index + 1 < args.length) outputPath = args[++index];
+    else throw new Error(`Unknown or incomplete approval issue option: ${option}`);
+  }
+  if (!bindingPath || !privateKeyPath || !keyId) {
+    throw new Error("approval issue requires --binding, --private-key and --key-id");
+  }
+  const ticket = issueApprovalTicket(
+    readJsonFile(bindingPath, "approval binding") as ApprovalTicketBinding,
+    {
+      keyId,
+      privateKey: createPrivateKey(readFileSync(resolve(privateKeyPath), "utf-8")),
+      ...(ttlMs === undefined ? {} : { ttlMs }),
+    },
+  );
+  writeOperatorArtifact(serializeApprovalTicket(ticket), outputPath);
+}
+
+function runManifestCommand(args: string[]): void {
+  const operation = args[0];
+  if (operation !== "sign" && operation !== "verify") {
+    throw new Error(
+      "Usage: riskproof manifest <sign|verify> --manifest <json> (--private-key|--public-key) <pem> --key-id <id> [--out <json>]",
+    );
+  }
+  let manifestPath: string | undefined;
+  let privateKeyPath: string | undefined;
+  let publicKeyPath: string | undefined;
+  let keyId: string | undefined;
+  let outputPath: string | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const option = args[index];
+    if (option === "--manifest" && index + 1 < args.length) manifestPath = args[++index];
+    else if (option === "--private-key" && index + 1 < args.length) privateKeyPath = args[++index];
+    else if (option === "--public-key" && index + 1 < args.length) publicKeyPath = args[++index];
+    else if (option === "--key-id" && index + 1 < args.length) keyId = args[++index];
+    else if (option === "--out" && index + 1 < args.length) outputPath = args[++index];
+    else throw new Error(`Unknown or incomplete manifest ${operation} option: ${option}`);
+  }
+  if (!manifestPath || !keyId) throw new Error(`manifest ${operation} requires --manifest and --key-id`);
+
+  if (operation === "sign") {
+    if (!privateKeyPath || publicKeyPath) {
+      throw new Error("manifest sign requires --private-key and does not accept --public-key");
+    }
+    const manifest = parsePinnedToolManifest(
+      readJsonFile(manifestPath, "unsigned tool manifest") as PinnedToolManifestV1,
+    );
+    const envelope = signPinnedToolManifest(manifest, {
+      algorithm: "Ed25519",
+      keyId,
+      privateKey: createPrivateKey(readFileSync(resolve(privateKeyPath), "utf-8")),
+    });
+    writeOperatorArtifact(serializeSignedPinnedToolManifestEnvelope(envelope), outputPath);
+    return;
+  }
+
+  if (!publicKeyPath || privateKeyPath || outputPath) {
+    throw new Error("manifest verify requires --public-key and does not accept --private-key/--out");
+  }
+  const verifier = new PinnedToolManifestVerifier([{
+    algorithm: "Ed25519",
+    keyId,
+    publicKey: createPublicKey(readFileSync(resolve(publicKeyPath), "utf-8")),
+  }]);
+  const result = verifier.verify(readFileSync(resolve(manifestPath), "utf-8"));
+  if (!result.verified) {
+    console.log(JSON.stringify({ verified: false, diagnostic: result.diagnostic }, null, 2));
+    process.exitCode = 3;
+    return;
+  }
+  console.log(JSON.stringify({ verified: true, manifest: result.value.getSummary() }, null, 2));
 }
 
 // ─── demo ──────────────────────────────────────────────────────────────────────
@@ -473,6 +799,62 @@ function mapToolForDemo(toolName: string, capTool?: string): ToolName | undefine
   if (/(\bhttp\b|fetch|request|\bweb\b|\bapi\b|\burl\b|export|report|upload|download|gateway|proxy|\bsync\b|\btag\b)/.test(lower)) return "http_request";
   if (/(\bemail\b|\bmail\b|send|notify|notification|\balert\b|message|publish|post|campaign)/.test(lower)) return "send_email";
   return "shell_exec";
+}
+
+interface TrustedExecutionContext extends PersistentLedgerScope {
+  traceId: string;
+  principal?: { type: string; id: string };
+}
+
+function readJsonFile(path: string, label: string): unknown {
+  try {
+    return JSON.parse(readFileSync(resolve(path), "utf-8"));
+  } catch (error) {
+    throw new Error(`Failed to read ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function parseTrustedExecutionContext(value: unknown): TrustedExecutionContext {
+  if (!isRecord(value)) throw new TypeError("execution context must be a JSON object");
+  const allowed = new Set(["tenantId", "userId", "taskId", "sessionId", "traceId", "principal"]);
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) throw new TypeError(`execution context has unknown field: ${unknown[0]}`);
+  const required = ["tenantId", "userId", "taskId", "sessionId", "traceId"] as const;
+  const context = {} as TrustedExecutionContext;
+  for (const field of required) {
+    const entry = value[field];
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 512) {
+      throw new TypeError(`execution context ${field} must be a non-empty bounded string`);
+    }
+    context[field] = entry;
+  }
+  if (value.principal !== undefined) {
+    if (!isRecord(value.principal) ||
+        Object.keys(value.principal).some((key) => !["type", "id"].includes(key)) ||
+        typeof value.principal.type !== "string" || value.principal.type.length === 0 ||
+        typeof value.principal.id !== "string" || value.principal.id.length === 0) {
+      throw new TypeError("execution context principal must contain exact non-empty type and id strings");
+    }
+    context.principal = { type: value.principal.type, id: value.principal.id };
+  }
+  return Object.freeze(context);
+}
+
+function readPositiveInteger(value: string, source: string): number {
+  if (!/^\d+$/u.test(value)) throw new Error(`${source} must be a positive integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${source} must be a positive integer`);
+  return parsed;
+}
+
+function writeOperatorArtifact(serialized: string, outputPath?: string): void {
+  if (outputPath === undefined) {
+    console.log(serialized);
+    return;
+  }
+  const target = resolve(outputPath);
+  writeFileSync(target, serialized + "\n", { encoding: "utf-8", mode: 0o600 });
+  console.log(JSON.stringify({ written: target }));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

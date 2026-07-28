@@ -7,6 +7,7 @@ import { types as utilTypes } from "node:util";
 import type { TaintLabel } from "./types.js";
 
 export type ContextEntryKind =
+  | "trusted_user"
   | "webpage"
   | "email"
   | "tool_output"

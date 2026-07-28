@@ -71,7 +71,7 @@ test-workspace/
 | Capability 约束 | S14–S19 | `block` 或 `ask_approval` |
 | Safety invariant | S20–S22、S25 | `block` |
 
-这 28 个文件是稳定的业务场景集，不等同于全部 19 条规则的唯一覆盖来源。新增的
+这 28 个文件是稳定的业务场景集，不等同于全部 21 条单次调用规则的唯一覆盖来源。新增的
 HTTP 敏感数据、嵌套 secret、多个收件人、配置、HTTP 边界、ProofStore 和其他
 回归路径由 `packages/riskproof/tests/` 中的 Vitest 测试覆盖。
 

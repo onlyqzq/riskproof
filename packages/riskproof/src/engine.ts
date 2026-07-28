@@ -2,13 +2,14 @@
 // RiskProof — Policy Engine (v3 merged)
 // ============================================================================
 // Single entry point: evaluate(input) → output
-// Merges: provenance collection + taint analysis + 19 policy rules + adapter
+// Merges: provenance collection + taint analysis + 21 policy rules + adapter
 //
 // Policy decisions are deterministic. Proof time/IDs include trusted clock and
 // random uniqueness metadata. No IO. No LLM.
 // ============================================================================
 
 import { randomUUID } from "node:crypto";
+import { posix as posixPath } from "node:path";
 import { RE2JS } from "re2js";
 import { validateConfig } from "./config.js";
 import { InputValidationError, parseEngineInput } from "./validation.js";
@@ -250,20 +251,65 @@ function extractEmailDomains(value: unknown): string[] {
   return [...domains];
 }
 
+function normalizeArgumentFieldName(field: string): string {
+  return field.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function matchingArgumentFields(
+  args: Record<string, ArgumentEvidence>,
+  aliases: ReadonlySet<string>,
+): string[] {
+  return Object.keys(args)
+    .filter((field) => aliases.has(normalizeArgumentFieldName(field)))
+    .sort();
+}
+
+function normalizeHost(host: string): string {
+  return host.toLowerCase().trim().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+}
+
 function extractUrlHosts(value: unknown): string[] {
   const text = valueToSearchText(value);
   if (!text) return [];
   const hosts = new Set<string>();
   const urls = text.match(/https?:\/\/[^\s"'<>]+/gi) ?? [];
   for (const raw of urls) {
-    try { hosts.add(new URL(raw.replace(/[),.;}\]]+$/, "")).hostname.toLowerCase()); }
+    try { hosts.add(normalizeHost(new URL(raw.replace(/[),.;}\]]+$/, "")).hostname)); }
     catch { /* invalid URL: ignored here and left to the caller's schema validation */ }
   }
   return [...hosts];
 }
 
+/**
+ * HTTP adapters do not agree on whether a target is a full URL, a URI, or a
+ * bare host. Only values from recognized target fields reach this helper, so a
+ * URL mentioned in a request body cannot be mistaken for the actual sink.
+ */
+function extractNetworkTargetHosts(value: unknown): string[] {
+  const hosts = new Set(extractUrlHosts(value));
+  const directValues = typeof value === "string"
+    ? [value]
+    : Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+
+  for (const raw of directValues) {
+    const candidate = raw.trim().replace(/^["']|["']$/g, "");
+    if (!candidate || /\s/.test(candidate)) continue;
+    try {
+      const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
+        ? candidate
+        : `http://${candidate}`);
+      hosts.add(normalizeHost(parsed.hostname));
+    } catch {
+      // Invalid targets are left to the downstream tool's own schema checks.
+    }
+  }
+  return [...hosts];
+}
+
 function isExternalDomain(host: string, internalDomains?: string[]): boolean {
-  const lower = host.toLowerCase().trim();
+  const lower = normalizeHost(host);
   if (["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(lower)) return false;
   if (/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/.test(lower)) return false;
   if (!internalDomains) return true;
@@ -271,6 +317,35 @@ function isExternalDomain(host: string, internalDomains?: string[]): boolean {
     const dl = d.toLowerCase();
     return lower === dl || lower.endsWith("." + dl) || (dl.startsWith("*.") && (lower.endsWith(dl.slice(1)) || lower === dl.slice(2)));
   });
+}
+
+function isCloudMetadataOrLinkLocalHost(host: string): boolean {
+  const lower = normalizeHost(host).replace(/%25[^:]+$/i, "");
+  const ipv4 = lower.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.every((octet) => octet <= 255)) {
+      if (octets[0] === 169 && octets[1] === 254) return true;
+      if ([
+        "100.100.100.200", // Alibaba Cloud metadata
+        "192.0.0.192", // Oracle Cloud metadata
+        "168.63.129.16", // Azure platform virtual IP
+      ].includes(lower)) return true;
+    }
+  }
+
+  if (/^fe[89ab][0-9a-f]:/i.test(lower)) return true; // IPv6 fe80::/10 link-local
+  if (lower === "fd00:ec2::254") return true; // AWS IMDS IPv6 endpoint
+  if (lower.startsWith("::ffff:")) {
+    return isCloudMetadataOrLinkLocalHost(lower.slice("::ffff:".length));
+  }
+
+  return [
+    "metadata.google.internal",
+    "metadata.goog",
+    "instance-data.ec2.internal",
+    "metadata.azure.internal",
+  ].some((metadataHost) => lower === metadataHost || lower.endsWith(`.${metadataHost}`));
 }
 
 function hasUntrustedProvenance(arg: ArgumentEvidence | undefined): string[] {
@@ -313,7 +388,45 @@ interface RuleContext {
 
 type RuleFn = (ctx: RuleContext) => MatchedPolicy | null;
 
-const EMAIL_RECIPIENT_FIELDS = ["to", "cc", "bcc"] as const;
+// MCP tools frequently expose semantically identical sinks under different
+// schema field names. Match exact normalized aliases (rather than substrings)
+// so aliases are covered without treating URLs/emails in ordinary body text as
+// destinations.
+const EMAIL_RECIPIENT_FIELD_ALIASES = new Set([
+  "to", "cc", "bcc", "mailto",
+  "recipient", "recipients", "recipientlist",
+  "email", "emails", "address", "addresses", "target", "targets",
+  "recipientemail", "recipientemails", "recipientaddress", "recipientaddresses",
+  "emailaddress", "emailaddresses", "targetemail", "targetemails",
+  "targetaddress", "targetaddresses", "toemail", "toemails", "toaddress", "toaddresses",
+]);
+
+const HTTP_TARGET_FIELD_ALIASES = new Set([
+  "url", "uri", "endpoint", "targeturl", "targeturi", "targetendpoint",
+  "webhook", "webhookurl", "webhookuri", "requesturl", "requesturi",
+  "destination", "destinationurl", "destinationuri", "callbackurl", "callbackuri",
+  "baseurl", "apiendpoint", "host", "hostname", "origin",
+]);
+
+const SHELL_COMMAND_FIELD_ALIASES = new Set([
+  "command", "cmd", "script", "code", "shellcommand", "shellcmd", "commandline",
+]);
+
+const FILE_WRITE_PATH_FIELD_ALIASES = new Set([
+  "path", "filepath", "filename", "file", "destination", "dest", "target",
+  "outputpath", "outputfile",
+]);
+
+const SINK_FIELD_ALIASES: Record<ToolName, ReadonlySet<string>> = {
+  send_email: EMAIL_RECIPIENT_FIELD_ALIASES,
+  http_request: HTTP_TARGET_FIELD_ALIASES,
+  shell_exec: SHELL_COMMAND_FIELD_ALIASES,
+  file_read: new Set(["path"]),
+  file_write: new Set([...FILE_WRITE_PATH_FIELD_ALIASES, "content"]),
+  database_query: new Set(["query", "sql", "statement"]),
+  browser_action: new Set(["url", "selector", "text"]),
+};
+
 const SENSITIVE_DATA_TAINTS: TaintLabel[] = [
   "CUSTOMER_DATA",
   "PII",
@@ -322,14 +435,131 @@ const SENSITIVE_DATA_TAINTS: TaintLabel[] = [
   "PATIENT_DATA",
 ];
 
+function emailRecipientFields(ctx: RuleContext): string[] {
+  return matchingArgumentFields(ctx.args, EMAIL_RECIPIENT_FIELD_ALIASES);
+}
+
+function httpTargetFields(ctx: RuleContext): string[] {
+  return matchingArgumentFields(ctx.args, HTTP_TARGET_FIELD_ALIASES);
+}
+
+function shellCommandFields(ctx: RuleContext): string[] {
+  return matchingArgumentFields(ctx.args, SHELL_COMMAND_FIELD_ALIASES);
+}
+
 function externalEmailDestinations(ctx: RuleContext): Array<{ field: string; domain: string }> {
   const destinations: Array<{ field: string; domain: string }> = [];
-  for (const field of EMAIL_RECIPIENT_FIELDS) {
+  for (const field of emailRecipientFields(ctx)) {
     for (const domain of extractEmailDomains(ctx.args[field]?.value)) {
       if (isExternalDomain(domain, ctx.options.internalDomains)) destinations.push({ field, domain });
     }
   }
   return destinations;
+}
+
+function httpDestinations(ctx: RuleContext): Array<{ field: string; host: string }> {
+  const destinations: Array<{ field: string; host: string }> = [];
+  for (const field of httpTargetFields(ctx)) {
+    for (const host of extractNetworkTargetHosts(ctx.args[field]?.value)) {
+      destinations.push({ field, host });
+    }
+  }
+  return destinations;
+}
+
+function normalizePotentialWritePath(raw: string): string {
+  let candidate = raw.trim().split("\0", 1)[0];
+  if ((candidate.startsWith("\"") && candidate.endsWith("\"")) ||
+      (candidate.startsWith("'") && candidate.endsWith("'"))) {
+    candidate = candidate.slice(1, -1);
+  }
+  candidate = candidate.replace(/^(?:\$HOME|\$\{HOME\})(?=\/)/, "~");
+  if (/^file:\/\//i.test(candidate)) {
+    try {
+      const fileUrl = new URL(candidate);
+      candidate = decodeURIComponent(fileUrl.pathname);
+    } catch {
+      candidate = candidate.replace(/^file:\/\/(?:localhost)?/i, "");
+    }
+  }
+  return posixPath.normalize(candidate);
+}
+
+function protectedWritePathKind(raw: string): string | null {
+  const path = normalizePotentialWritePath(raw).toLowerCase();
+  const home = String.raw`(?:~|/root|/home/[^/]+|/users/[^/]+)`;
+
+  if (/^\/(?:private\/)?etc(?:\/|$)/.test(path)) return "system configuration (/etc)";
+  if (new RegExp(`^(?:${home}/)?\\.ssh(?:/|$)`).test(path)) return "SSH configuration";
+  if (new RegExp(`^(?:${home}/)?\\.(?:bashrc|zshrc|profile|bash_profile|bash_login|zprofile|zlogin|zshenv)$`).test(path)) {
+    return "shell startup configuration";
+  }
+  if (/^\/(?:var\/spool\/cron|var\/cron|var\/at\/tabs|usr\/lib\/cron)(?:\/|$)/.test(path)) {
+    return "scheduled-task configuration";
+  }
+  if (/^\/(?:usr\/lib\/systemd|lib\/systemd|run\/systemd\/system)(?:\/|$)/.test(path) ||
+      new RegExp(`^(?:${home}/)?\\.config/systemd(?:/|$)`).test(path)) {
+    return "systemd persistence configuration";
+  }
+  if (/^\/(?:system\/)?library\/(?:launchagents|launchdaemons|startupitems)(?:\/|$)/.test(path) ||
+      new RegExp(`^${home}/library/(?:launchagents|launchdaemons|startupitems)(?:/|$)`).test(path)) {
+    return "macOS launch persistence configuration";
+  }
+  if (new RegExp(`^(?:${home}/)?\\.config/autostart(?:/|$)`).test(path)) {
+    return "desktop autostart configuration";
+  }
+  return null;
+}
+
+function shellTokenCommandName(token: string): string {
+  const cleaned = token.toLowerCase().replace(/^["']|["']$/g, "").replace(/[;&|]+$/g, "");
+  return cleaned.split("/").pop() ?? cleaned;
+}
+
+function protectedShellWriteTargets(command: string, nestingDepth = 0): Array<{ target: string; kind: string }> {
+  const persistentCommand = [
+    { re: /(?:^|[;&|]\s*)crontab\s+(?!-l(?:\s|$))\S+/i, kind: "scheduled-task configuration" },
+    { re: /\bsystemctl\s+(?:enable|reenable|link|preset)\b/i, kind: "systemd persistence configuration" },
+    { re: /\blaunchctl\s+(?:load|bootstrap|enable|submit)\b/i, kind: "macOS launch persistence configuration" },
+  ].find(({ re }) => re.test(command));
+  if (persistentCommand) return [{ target: "<persistence command>", kind: persistentCommand.kind }];
+
+  if (nestingDepth < 4) {
+    const nestedShell = command.match(/\b(?:ba|da|z)?sh\s+-c\s+(["'])([\s\S]*?)\1/i);
+    if (nestedShell) return protectedShellWriteTargets(nestedShell[2], nestingDepth + 1);
+  }
+
+  const alwaysMutating = new Set(["tee", "touch", "mkdir", "rm", "chmod", "chown", "chgrp", "truncate"]);
+  const destinationMutating = new Set(["cp", "mv", "install", "ln"]);
+  const matches: Array<{ target: string; kind: string }> = [];
+  for (const segment of command.split(/\s*(?:&&|\|\||[;|])\s*/)) {
+    const tokens = segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+    const commandNames = tokens.map(shellTokenCommandName);
+    const hasAlwaysMutatingCommand = commandNames.some((name) => alwaysMutating.has(name));
+    const hasDestinationMutatingCommand = commandNames.some((name) => destinationMutating.has(name));
+    const hasInPlaceEdit = commandNames.some((name) => name === "sed" || name === "perl") &&
+      tokens.some((token) => /^-[a-z]*i[a-z]*$/i.test(token));
+
+    for (let index = 0; index < tokens.length; index += 1) {
+      const rawToken = tokens[index];
+      const redirected = /^\d*>>?/.test(rawToken) || /^\d*>>?$/.test(tokens[index - 1] ?? "");
+      const outputAssignment = /^of=/i.test(rawToken);
+      const cleaned = rawToken
+        .replace(/^\d*>>?/, "")
+        .replace(/^of=/i, "")
+        .replace(/^["']|["']$/g, "")
+        .replace(/[,)]+$/g, "");
+      const kind = protectedWritePathKind(cleaned);
+      if (!kind) continue;
+
+      const isLastArgument = index === tokens.length - 1;
+      if (redirected || outputAssignment || hasAlwaysMutatingCommand || hasInPlaceEdit ||
+          (hasDestinationMutatingCommand && isLastArgument)) {
+        matches.push({ target: normalizePotentialWritePath(cleaned), kind });
+      }
+    }
+  }
+  return matches;
 }
 
 // R1: Sensitive business/personal data → external email
@@ -340,8 +570,9 @@ const ruleCustomerDataExternal: RuleFn = (ctx) => {
 
   const sensitiveArgs: string[] = [];
   const evidence: string[] = [];
+  const recipientFields = new Set(emailRecipientFields(ctx));
   for (const [key, arg] of Object.entries(ctx.args)) {
-    if ((EMAIL_RECIPIENT_FIELDS as readonly string[]).includes(key)) continue;
+    if (recipientFields.has(key)) continue;
     const hits = getTaints(arg).filter((taint) => SENSITIVE_DATA_TAINTS.includes(taint));
     if (hits.length > 0) {
       sensitiveArgs.push(key);
@@ -381,19 +612,38 @@ const ruleSecretExternalEmail: RuleFn = (ctx) => {
   return null;
 };
 
+// Cloud instance metadata and link-local services must never be reachable via
+// an agent-controlled HTTP tool, even when an operator lists a broad internal
+// domain or when no sensitive taint is present on the request.
+const ruleCloudMetadataLinkLocalHttp: RuleFn = (ctx) => {
+  if (ctx.tool !== "http_request") return null;
+  const restricted = httpDestinations(ctx)
+    .filter(({ host }) => isCloudMetadataOrLinkLocalHost(host));
+  if (restricted.length === 0) return null;
+
+  const targets = [...new Set(restricted.map(({ host }) => host))];
+  return {
+    id: "cloud_metadata_link_local_http",
+    triggeredArgs: [...new Set(restricted.map(({ field }) => field))],
+    evidence: [`HTTP target resolves to a cloud metadata or link-local address: ${targets.join(", ")}`],
+    reason: `HTTP 目标为云元数据或链路本地地址 (${targets.join(", ")})，可能泄露实例凭据或访问宿主控制面`,
+  };
+};
+
 // R3: Secret/API Key → external HTTP
 const ruleSecretExternalHttp: RuleFn = (ctx) => {
   if (ctx.tool !== "http_request") return null;
-  const externalHosts = extractUrlHosts(ctx.args["url"]?.value)
-    .filter((host) => isExternalDomain(host, ctx.options.internalDomains));
-  if (externalHosts.length === 0) return null;
+  const destinations = httpDestinations(ctx)
+    .filter(({ host }) => isExternalDomain(host, ctx.options.internalDomains));
+  if (destinations.length === 0) return null;
+  const externalHosts = [...new Set(destinations.map(({ host }) => host))];
 
   for (const key of Object.keys(ctx.args)) {
     const arg = ctx.args[key];
     if (hasAnyTaint(arg, ["SECRET", "API_KEY"])) {
       return {
         id: "secret_external_http",
-        triggeredArgs: [key],
+        triggeredArgs: [...new Set([key, ...destinations.map(({ field }) => field)])],
         evidence: [`arg '${key}' has SECRET/API_KEY`, `external URL host(s): ${externalHosts.join(", ")}`],
         reason: `参数包含密钥/凭证且目标为外部地址 (${externalHosts.join(", ")})，存在凭据泄露风险`,
       };
@@ -405,14 +655,15 @@ const ruleSecretExternalHttp: RuleFn = (ctx) => {
 // Sensitive business/personal data → external HTTP
 const ruleSensitiveExternalHttp: RuleFn = (ctx) => {
   if (ctx.tool !== "http_request") return null;
-  const externalHosts = extractUrlHosts(ctx.args["url"]?.value)
-    .filter((host) => isExternalDomain(host, ctx.options.internalDomains));
-  if (externalHosts.length === 0) return null;
+  const destinations = httpDestinations(ctx)
+    .filter(({ host }) => isExternalDomain(host, ctx.options.internalDomains));
+  if (destinations.length === 0) return null;
+  const targetFields = new Set(httpTargetFields(ctx));
 
   const triggeredArgs: string[] = [];
   const evidence: string[] = [];
   for (const [key, arg] of Object.entries(ctx.args)) {
-    if (key === "url") continue;
+    if (targetFields.has(key)) continue;
     const hits = getTaints(arg).filter((taint) => SENSITIVE_DATA_TAINTS.includes(taint));
     if (hits.length > 0) {
       triggeredArgs.push(key);
@@ -421,11 +672,11 @@ const ruleSensitiveExternalHttp: RuleFn = (ctx) => {
   }
   if (triggeredArgs.length === 0) return null;
 
-  const hosts = [...new Set(externalHosts)];
+  const hosts = [...new Set(destinations.map(({ host }) => host))];
   evidence.push(`external URL host(s): ${hosts.join(", ")}`);
   return {
     id: "sensitive_data_external_http",
-    triggeredArgs: [...triggeredArgs, "url"],
+    triggeredArgs: [...new Set([...triggeredArgs, ...destinations.map(({ field }) => field)])],
     evidence,
     reason: `敏感业务/个人数据将发送到外部 HTTP 地址 (${hosts.join(", ")})，存在数据外泄风险`,
   };
@@ -434,19 +685,26 @@ const ruleSensitiveExternalHttp: RuleFn = (ctx) => {
 // R4: Untrusted source → shell command
 const ruleUntrustedShell: RuleFn = (ctx) => {
   if (ctx.tool !== "shell_exec") return null;
-  const cmd = ctx.args["command"];
-  if (!cmd) return null;
-  const untrustedTaints = getTaints(cmd).filter((t) => UNTRUSTED_TAINTS.includes(t));
-  const untrustedProv = hasUntrustedProvenance(cmd);
-  if (untrustedTaints.length === 0 && untrustedProv.length === 0) return null;
-
+  const triggeredArgs: string[] = [];
   const evidence: string[] = [];
-  if (untrustedTaints.length > 0) evidence.push(`arg 'command' has untrusted taints: ${untrustedTaints.join(", ")}`);
-  if (untrustedProv.length > 0) evidence.push(`arg 'command' has untrusted provenance: ${untrustedProv.join(", ")}`);
+  for (const field of shellCommandFields(ctx)) {
+    const command = ctx.args[field];
+    const untrustedTaints = getTaints(command).filter((taint) => UNTRUSTED_TAINTS.includes(taint));
+    const untrustedProv = hasUntrustedProvenance(command);
+    if (untrustedTaints.length === 0 && untrustedProv.length === 0) continue;
+    triggeredArgs.push(field);
+    if (untrustedTaints.length > 0) {
+      evidence.push(`arg '${field}' has untrusted taints: ${untrustedTaints.join(", ")}`);
+    }
+    if (untrustedProv.length > 0) {
+      evidence.push(`arg '${field}' has untrusted provenance: ${untrustedProv.join(", ")}`);
+    }
+  }
+  if (triggeredArgs.length === 0) return null;
 
   return {
     id: "untrusted_influenced_shell",
-    triggeredArgs: ["command"],
+    triggeredArgs,
     evidence,
     reason: "Shell 命令受不可信来源影响，存在间接注入或恶意指令风险",
   };
@@ -471,13 +729,57 @@ const ruleDangerousShell: RuleFn = (ctx) => {
   return null;
 };
 
+// Writes to host configuration and common persistence locations are blocked
+// independently of taint. This covers direct file tools and obvious shell
+// write/activation forms while preserving ordinary reads such as `cat /etc/hosts`.
+const ruleProtectedSystemPathWrite: RuleFn = (ctx) => {
+  const triggeredArgs: string[] = [];
+  const evidence: string[] = [];
+
+  if (ctx.tool === "file_write") {
+    for (const field of matchingArgumentFields(ctx.args, FILE_WRITE_PATH_FIELD_ALIASES)) {
+      const value = ctx.args[field]?.value;
+      const paths = typeof value === "string"
+        ? [value]
+        : Array.isArray(value)
+          ? value.filter((item): item is string => typeof item === "string")
+          : [];
+      for (const path of paths) {
+        const kind = protectedWritePathKind(path);
+        if (!kind) continue;
+        triggeredArgs.push(field);
+        evidence.push(`arg '${field}' writes protected ${kind}: ${normalizePotentialWritePath(path)}`);
+      }
+    }
+  }
+
+  if (ctx.tool === "shell_exec") {
+    for (const field of shellCommandFields(ctx)) {
+      const command = ctx.args[field]?.value;
+      if (typeof command !== "string") continue;
+      for (const { target, kind } of protectedShellWriteTargets(command)) {
+        triggeredArgs.push(field);
+        evidence.push(`arg '${field}' writes or activates protected ${kind}: ${target}`);
+      }
+    }
+  }
+
+  if (triggeredArgs.length === 0) return null;
+  return {
+    id: "protected_system_path_write",
+    triggeredArgs: [...new Set(triggeredArgs)],
+    evidence: [...new Set(evidence)],
+    reason: "调用尝试写入系统配置、凭据或启动持久化位置，默认禁止以防止宿主篡改与持久化",
+  };
+};
+
 // R6: Untrusted provenance → email recipient
 const ruleUntrustedEmailTo: RuleFn = (ctx) => {
   if (ctx.tool !== "send_email") return null;
   const triggeredArgs: string[] = [];
   const untrustedSources = new Set<string>();
   const externalDomains = new Set<string>();
-  for (const field of EMAIL_RECIPIENT_FIELDS) {
+  for (const field of emailRecipientFields(ctx)) {
     const untrusted = hasUntrustedProvenance(ctx.args[field]);
     const external = extractEmailDomains(ctx.args[field]?.value)
       .filter((domain) => isExternalDomain(domain, ctx.options.internalDomains));
@@ -502,14 +804,22 @@ const ruleUntrustedEmailTo: RuleFn = (ctx) => {
 // R7: Untrusted provenance → shell command
 const ruleUntrustedProvShell: RuleFn = (ctx) => {
   if (ctx.tool !== "shell_exec") return null;
-  const cmd = ctx.args["command"];
-  const untrusted = hasUntrustedProvenance(cmd);
-  if (untrusted.length === 0) return null;
+  const triggeredArgs: string[] = [];
+  const evidence: string[] = [];
+  const untrustedSources = new Set<string>();
+  for (const field of shellCommandFields(ctx)) {
+    const untrusted = hasUntrustedProvenance(ctx.args[field]);
+    if (untrusted.length === 0) continue;
+    triggeredArgs.push(field);
+    untrusted.forEach((source) => untrustedSources.add(source));
+    evidence.push(`arg '${field}' has untrusted provenance: ${untrusted.join(", ")}`);
+  }
+  if (triggeredArgs.length === 0) return null;
   return {
     id: "untrusted_provenance_shell",
-    triggeredArgs: ["command"],
-    evidence: [`arg 'command' has untrusted provenance: ${untrusted.join(", ")}`],
-    reason: `Shell 命令参数来源于不可信来源 (${untrusted.join(", ")})，存在代码执行风险`,
+    triggeredArgs,
+    evidence,
+    reason: `Shell 命令参数来源于不可信来源 (${[...untrustedSources].join(", ")})，存在代码执行风险`,
   };
 };
 
@@ -611,13 +921,14 @@ const ruleForbiddenTaint: RuleFn = (ctx) => {
 const ruleRecipientDomain: RuleFn = (ctx) => {
   if (ctx.tool !== "send_email") return null;
   if (!ctx.capability?.allowedRecipientDomains?.length) return null;
-  const domainsByField = EMAIL_RECIPIENT_FIELDS.flatMap((field) =>
+  const recipientFields = emailRecipientFields(ctx);
+  const domainsByField = recipientFields.flatMap((field) =>
     extractEmailDomains(ctx.args[field]?.value).map((domain) => ({ field, domain })),
   );
   if (domainsByField.length === 0) {
     return {
       id: "capability_recipient_domain_not_allowed",
-      triggeredArgs: ["to"],
+      triggeredArgs: recipientFields.length > 0 ? recipientFields : ["to"],
       evidence: ["capability restricts recipient domains but no valid recipient domain was provided"],
       reason: "能力授权要求受限收件人域名，但调用未提供可验证的收件人地址",
     };
@@ -749,9 +1060,11 @@ const ALL_RULES: RuleFn[] = [
   ruleForbiddenTaint,
   ruleRecipientDomain,
   // Deny rules
+  ruleCloudMetadataLinkLocalHttp,
   ruleSecretExternalEmail,
   ruleSecretExternalHttp,
   ruleDangerousShell,
+  ruleProtectedSystemPathWrite,
   ruleDangerousDatabase,
   // Require-approval rules
   ruleNoCapability,
@@ -772,6 +1085,7 @@ function ruleDecision(id: string, customRules?: CustomRule[]): Decision {
     "invariant_numeric_range_violation", "capability_tool_mismatch",
     "capability_expired", "capability_forbidden_taint",
     "capability_recipient_domain_not_allowed",
+    "cloud_metadata_link_local_http", "protected_system_path_write",
     "secret_external_send", "secret_external_http", "dangerous_shell_pattern",
     "dangerous_database_query",
   ];
@@ -790,7 +1104,8 @@ function ruleDecision(id: string, customRules?: CustomRule[]): Decision {
 function ruleRisk(id: string, customRules?: CustomRule[]): RiskLevel {
   const critical = ["invariant_protected_taint_modified", "capability_tool_mismatch",
     "capability_forbidden_taint", "secret_external_send", "secret_external_http",
-    "dangerous_shell_pattern", "dangerous_database_query"];
+    "dangerous_shell_pattern", "dangerous_database_query",
+    "cloud_metadata_link_local_http", "protected_system_path_write"];
   if (critical.includes(id)) return "critical";
   const builtInHigh = [
     "invariant_forbidden_tool", "invariant_numeric_range_violation", "capability_expired",
@@ -979,19 +1294,8 @@ export function evaluate(rawInput: EngineInput, config?: RiskProofConfig): Engin
   const enrichedArgs = propagateFlows(enrichTaints(args, input.taints), input.flows);
 
   // Step 3: Mark sink arguments
-  const sinks: Record<ToolName, string[]> = {
-    send_email: ["to", "cc", "bcc"],
-    http_request: ["url"],
-    shell_exec: ["command"],
-    file_read: ["path"],
-    file_write: ["path", "content"],
-    database_query: ["query", "sql", "statement"],
-    browser_action: ["url", "selector", "text"],
-  };
-  for (const argName of sinks[input.tool]) {
-    if (enrichedArgs[argName]) {
-      enrichedArgs[argName] = { ...enrichedArgs[argName], isSink: true };
-    }
+  for (const argName of matchingArgumentFields(enrichedArgs, SINK_FIELD_ALIASES[input.tool])) {
+    enrichedArgs[argName] = { ...enrichedArgs[argName], isSink: true };
   }
 
   // Step 4: Build rule context

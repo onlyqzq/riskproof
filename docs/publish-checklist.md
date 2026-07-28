@@ -168,7 +168,7 @@ require explicit release-owner/security approval and are not normal rollback.
 ## Deployment rollback
 
 Publishing is not production deployment. Deployment must reference an immutable
-image digest, preserve the proof volume, and follow `RELEASE_READINESS.md` and
-`docs/docker.md`. Roll back to the prior image and configuration; do not delete
+image digest, preserve the proof volume, and follow this checklist and
+`docker.md`. Roll back to the prior image and configuration; do not delete
 audit data or perform an irreversible database operation (there is no database
 migration in `0.1.0`).

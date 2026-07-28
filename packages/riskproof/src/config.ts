@@ -107,6 +107,8 @@ const BUILT_IN_RULE_IDS = new Set([
   "capability_expired",
   "capability_forbidden_taint",
   "capability_recipient_domain_not_allowed",
+  "cloud_metadata_link_local_http",
+  "protected_system_path_write",
   "secret_external_send",
   "secret_external_http",
   "dangerous_shell_pattern",

@@ -1,0 +1,25 @@
+{
+  "taskId": "quarterly-report-summary-2026-q2",
+  "objectiveDigest": "c41961b323168b01009f56fd7461caf17aeec2ab35d4e86ca9f6e866fd64bbc2",
+  "expiresAt": "2026-08-01T00:00:00.000Z",
+  "maxCalls": 4,
+  "allowedTools": [
+    {
+      "toolName": "read_quarterly_report",
+      "descriptorDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "maxCalls": 1,
+      "allowedProvenance": [
+        "trusted_user_1"
+      ]
+    },
+    {
+      "toolName": "summarize_document",
+      "descriptorDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "maxCalls": 2,
+      "allowedProvenance": [
+        "trusted_user_1",
+        "internal_doc_1"
+      ]
+    }
+  ]
+}

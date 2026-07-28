@@ -9,12 +9,31 @@ All notable changes are documented here following
 ### Added
 
 - Runtime validation for CLI, HTTP, MCP, and the public `evaluate()` boundary.
-- The `sensitive_data_external_http`, `dangerous_database_query`, and
-  `untrusted_mutative_tool` policies, bringing the engine to 19 built-in match
-  rules plus the configurable default-deny fallback.
+- The `sensitive_data_external_http`, `dangerous_database_query`,
+  `untrusted_mutative_tool`, `cloud_metadata_link_local_http`, and
+  `protected_system_path_write` policies, bringing the per-call engine to 21
+  built-in match rules plus the configurable default-deny fallback.
 - Bounded MCP `ContextTracker` and `ProvenanceMapper` support for semantic,
   exact-substring provenance across resources, prompts, and tool results, with
   explicit `agent_generated` fallback and additive transformation `flows`.
+- A bounded, metadata-only `ToolchainGuard` with deterministic EIT/PAT/NAT
+  classification, cross-tool transition review, and confirmed parasitic
+  exfiltration blocking. A UI-neutral redacted causal explanation model exposes
+  risk paths, evidence coverage, impact, and safer alternatives.
+- Complete canonical MCP tool-descriptor commitments with process-local TOFU
+  and operator-pinned modes. Name collisions, manifest mismatches, late
+  additions, and descriptor rug pulls enter sticky quarantine before planning
+  or direct invocation.
+- A host-held `TaskAuthorizationGuard` and `--task-contract` CLI path that bind
+  calls to exact tool names, optional descriptor digests, provenance IDs,
+  expiry, and global/per-tool budgets. Pending calls reserve budget before
+  dispatch; failed results release it and successful results consume it.
+- A bidirectional MCP method firewall that rejects unknown client requests,
+  locally terminates or rejects server requests, narrows initialize
+  capabilities, drops unmatched responses, and normalizes correlated replies.
+- A five-part `npm run demo:research` conformance demonstration covering tool
+  identity, task authority, parasitic chains, dangerous sinks, and protocol
+  boundaries without real network, secret, or dangerous-tool side effects.
 - OPA/Rego policy-as-code through the official OPA WASM runtime, with
   monotonic multi-module aggregation and fail-closed result validation.
 - `file_read`, `file_write`, `database_query`, and `browser_action` engine tool
@@ -43,8 +62,14 @@ All notable changes are documented here following
 - Python runtime dependencies moved to patched LangGraph/LangChain 1.x ranges.
 - MCP tools no longer receive capabilities based on read-like name substrings;
   unclassified calls require approval.
+- Upstream MCP processes now inherit a minimal launch-variable allowlist rather
+  than the complete parent environment. Example MCP configuration exposes only
+  the RiskProof wrapper, not a parallel raw-server bypass.
 - Poisoned tools are hidden from model-visible `tools/list` while retained in a
   quarantine cache for direct-call blocking.
+- `tools/list` now preserves request parameters and commits complete raw
+  descriptors before legacy scanner/cache reduction. Programmatic hosts may
+  preload authenticated `trusted_user` context in a host-owned tracker.
 - LangGraph tool execution now preflights every call, batches all approval
   decisions, then executes each allowed/approved tool at most once.
 - CI uses the root lockfile, Node 22/24 and Python 3.10–3.13; release actions are
@@ -94,6 +119,10 @@ All notable changes are documented here following
 - MCP response context is bounded and memory-only; metadata inspection never
   returns the indexed raw content. Proof envelope verification uses constant-
   time signature comparison, and unreadable evidence is never auto-pruned.
+- Upstream MCP processes inherit a minimal parent environment, known metadata
+  SSRF and persistence sinks deny even with a matching capability, tool
+  identity quarantine is monotonic, and task call budgets count in-flight work
+  to prevent parallel overrun.
 
 ### Compatibility
 

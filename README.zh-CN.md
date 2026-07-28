@@ -1,13 +1,23 @@
 # RiskProof
 
-RiskProof 是一个面向 AI Agent 高风险工具调用的、确定性的风险感知审批层。
-在 Agent 发送邮件、发起 HTTP 请求或执行 Shell 命令之前，RiskProof 会组合
-参数来源、污点标签、能力授权、安全不变式和策略命中证据，返回 `allow`、
-`ask_approval` 或 `block`，并生成结构化审计 proof。
+> **让每一次 MCP 工具调用，带着证据再执行。**
+
+RiskProof 是 MCP/AI Agent 工具链的确定性执行控制层。在 Agent 发送邮件、发起
+HTTP 请求、读取或写入文件、修改数据库、驱动浏览器或执行命令之前，RiskProof
+会组合参数来源、污点标签、工具链能力、最小权限、安全不变式和策略证据，返回
+`allow`、`ask_approval` 或 `block`，并生成结构化审计 proof。
+
+MCP 的新风险不只来自恶意工具：外部内容摄入、私密数据访问和网络发送三个正常
+工具，也能被寄生指令拼成完整攻击链。RiskProof 把安全边界放在模型与真实副作用
+之间；模型可以判断错误，但错误不应自动获得执行权。完整威胁模型、论文证据边界、
+当前覆盖矩阵和产品路线见 [`docs/threat-model.md`](docs/threat-model.md)。
+更完整的学术谱系、逐项证据边界和论文到机制映射见
+[`docs/research-foundations.md`](docs/research-foundations.md)。
 
 当前工作区是 `0.1.0` 发布候选版本。截至 2026-07-12，尚无证据表明 npm、
-PyPI 和 GHCR 制品已经公开发布。在发布负责人完成 `RELEASE_READINESS.md`
-中的命名空间、OIDC 和制品来源确认前，请使用源码或本地构建的制品。
+PyPI 和 GHCR 制品已经公开发布。在发布负责人完成
+[`docs/publish-checklist.md`](docs/publish-checklist.md) 中的命名空间、OIDC 和
+制品来源确认前，请使用源码或本地构建的制品。
 
 ## 核心流程
 
@@ -18,10 +28,19 @@ Agent 工具调用
 运行时校验 ── 未知工具/非法输入 ──▶ 拒绝
       │
       ▼
+完整工具描述符身份 ── 漂移/重名 ──▶ 粘滞隔离
+      │
+      ▼
+Host 任务合同（工具 + 版本 + 来源 + 时限 + 调用预算）
+      │
+      ▼
 Provenance + Taint + Capability + Invariant
       │
       ▼
-确定性策略引擎（19 条内建匹配规则 + 配置/OPA 策略）
+EIT / PAT / NAT 能力画像 + 有界跨工具序列审计
+      │
+      ▼
+确定性策略引擎（内建匹配规则 + 工具链规则 + 配置/OPA 策略）
       │
       ├── allow ───────────────▶ 可以进入工具执行阶段
       ├── ask_approval ────────▶ 等待可信人工决定
@@ -95,6 +114,7 @@ proof 默认写入 `.riskproof/proofs/YYYY-MM/`。
 | `npm run serve` | 启动本地 HTTP 评估服务 |
 | `npm run proxy -- --no-interactive --upstream <command...>` | 启动 stdio MCP 代理 |
 | `npm run demo` | 运行确定性内建 fixture 并保存 proof |
+| `npm run demo:research` | 构建并运行五段式、无外发的研究演示 |
 | `npm run verify` | 版本门禁、类型/代码检查、构建、单测与集成测试 |
 | `npm run test:all` | 单测、API/CLI 28 场景和 MCP 集成测试 |
 | `npm run benchmark` | 构建并运行可复现的本地微基准 |
@@ -237,13 +257,51 @@ stdio MCP 代理会扫描上游工具定义，把被投毒工具从模型可见�
 移除；隔离缓存仍保留，所以直接调用也会被阻断。其余工具会保守分类；未分类
 或没有可信 capability 的调用进入审批，不会根据“看起来像只读”的名称自动授权。
 
+工具描述符进入规划模型之前，代理会对完整 JSON 对象生成 canonical SHA-256
+commitment；name、description、输入/输出 Schema、annotations、`_meta` 和未来字段
+都属于身份。对象 key 顺序不影响摘要，但 Unicode 字符内容和数组顺序会保留。
+同一快照重名、pinned manifest 不匹配、基线后的新增工具和 rug pull 会进入粘滞
+quarantine，直接调用同样被拒绝。默认 TOFU 只能发现进程内“首次信任之后”的变化，
+不能认证第一次连接到的 Server；高保证部署应由 Host 注入 operator-approved pinned
+`ToolIdentityGuard`。descriptor digest 证明“声明过什么”，不证明后端实现诚实。
+
+可选的 Host-held `TaskAuthorizationGuard` 继续收窄执行权：合同可绑定 exact upstream
+工具名、descriptor digest、允许的 provenance ID、过期时间、任务总调用预算和单工具
+预算。真实 dispatch 前会先 reserve，MCP 失败结果会释放预算，只有成功调用才消费。
+合同不从模型控制的 `tools/call` metadata 读取，工具输出也不能为自己扩权。
+`task_contract_matched` 会把合同摘要写入结构化决策证据，同时明确它只是结构授权
+匹配，不是语义 task-alignment oracle。
+
+CLI 可从可信本地文件加载合同：
+
+```bash
+riskproof proxy \
+  --task-contract examples/task-contract.example.json \
+  --no-interactive \
+  --upstream your-mcp-server
+```
+
+示例中的全零 descriptor digest 会刻意失败关闭；使用前必须替换成 operator 审核过的
+完整工具对象 `digestToolDescriptor(fullToolObject)`。程序化 Host 可以先把已认证用户
+输入记录到共享 `ContextTracker` 的 `trusted_user` 条目，再通过
+`contextTrackerInstance` 注入代理，并把得到的 provenance ID 写进
+`allowedProvenance`。没有这层 Host 认证时，`agent_generated` 只能表示未知 lineage，
+不能包装成“来自用户”的证据。
+
+代理还会把工具保守标记为外部摄入（EIT）、私密访问（PAT）和对外披露（NAT），
+并在有界、仅含元数据的调用历史上识别 EIT→PAT→NAT。EIT→PAT 会升级审批；
+完整能力路径进入 critical 审批；若最终外发参数携带前一步私密结果的 provenance
+或敏感 taint，则默认 `block`。单个同时具备三类能力的通用工具也会进入 critical
+审批。只有真实转发成功的调用才提交为完成事件，原始工具返回不会进入序列历史。
+
 代理会为 `resources/read`、`prompts/get` 和成功的 `tools/call` 返回内容建立有界
 内存索引。后续参数通过精确子串反查自动得到 `webpage_1`、`email_2`、
 `customer_data_1` 等语义来源；没有命中的参数明确标为 `agent_generated`。原始
 上下文不落盘，也不会通过诊断接口暴露。摘要或改写造成精确文本消失时，可信
 集成可声明 `flows: [{"from":"source","to":"summary","via":"agent_summary"}]`
-数据流；它只能追加继承的来源和污点，不能清除证据。MCP 调用可在
-`_meta.riskproof_flows` 提交相同的边。
+数据流；它只能追加继承的安全来源和污点，不能降低风险。更强来源到达时，
+`agent_generated` 占位符可能被替换。MCP 调用可在 `_meta.riskproof_flows`
+提交相同的边；即使调用方不可信，伪造边也只能收紧决策，不能授予权限。
 
 代理提供无副作用的 `riskproof/evaluate`，Python Agent 会先评估本批所有工具，
 合并成一次 LangGraph interrupt，得到完整人工决定后才逐个执行。这样可以避免
@@ -259,6 +317,17 @@ Python：allow_unsigned_client_decisions=True
 
 两端必须同时开启。它不是签名审批令牌，不能用于不可信网络、多租户或不可信
 MCP client。详见 `SECURITY.md`。
+
+上游 MCP Server 默认只继承 `PATH`、`HOME`、临时目录、locale 和必要的 Windows
+启动变量。AWS、GitHub、npm、数据库、SSH Agent 等父进程凭据不会隐式下传；业务
+变量必须显式配置。不要在同一个 MCP 配置中同时注册原始 Server 和 RiskProof
+包装入口，否则模型可以直接绕过代理。未知或低信任 Server 仍应运行在只读文件系统、
+最小挂载和受控出站网络的独立沙箱中。
+
+当前 stdio CLI 的序列状态属于单个 proxy 进程。多个独立 proxy 之间尚未共享
+session provenance，因此不能把当前版本描述为已经完整防御跨 Server MCP-UPD；
+程序化 Host 可共享导出的 `ToolchainGuard`，生产路线是 host-level gateway 或共享
+session ledger。
 
 ## Python SDK
 
@@ -291,7 +360,7 @@ Python 包提供：
 
 ## 内建策略范围
 
-19 条内建匹配规则覆盖：
+内建逐调用规则与工具链规则覆盖：
 
 - Secret/API Key 通过外部邮件或 HTTP 外发；
 - 客户数据、PII、源码、财务数据和病患数据进入外部 sink；
@@ -300,7 +369,11 @@ Python 包提供：
 - 不可信收件人及 Shell 参数来源；
 - 缺失、过期、不匹配或越权 capability；
 - 收件人和 provenance 白名单；
-- 禁用工具、受保护 taint 和数值型安全不变式。
+- 禁用工具、受保护 taint 和数值型安全不变式；
+- 云元数据/link-local SSRF 目标，以及系统配置和持久化位置写入；
+- 完整工具描述符连续性、重名冲突和 pinned manifest；
+- 可选的任务级工具/版本/来源/时限/调用预算授权；
+- 外部摄入→私密访问→外部披露的能力跃迁和确认数据外发链。
 
 `options.defaultDecision="deny"` 会在没有匹配规则时添加兜底拒绝。Shell 检测是
 纵深防御，不是完整 Shell 解析器或沙箱。
@@ -366,7 +439,7 @@ docker compose up -d
 ```
 
 `docker-compose.sidecar.yml` 中的 `your-agent-image` 是占位符，执行 `up` 前必须
-替换。备份、冒烟和回滚步骤见 `docs/docker.md` 和 `RELEASE_READINESS.md`。
+替换。备份、冒烟和回滚步骤见 `docs/docker.md` 和 `docs/publish-checklist.md`。
 
 ## 项目结构
 
@@ -377,10 +450,10 @@ test-workspace/           28 个策略场景和 mock MCP 集成服务
 scripts/                  版本门禁、benchmark、OPA 与 Docker 发布 smoke
 .github/workflows/        CI 和受控发布准备
 docs/                     架构、Docker 和发布文档
-PROJECT_AUDIT.md          架构审查和风险登记
-TEST_REPORT.md            已执行命令、结果和覆盖率
-OPTIMIZATION_REPORT.md    性能/稳定性证据
-RELEASE_READINESS.md      部署、冒烟、监控和回滚手册
+docs/threat-model.md      威胁模型、论文映射、覆盖矩阵和产品路线
+docs/publish-checklist.md 发布、制品来源和上线检查
+docs/docker.md            容器构建、冒烟和部署边界
+SECURITY.md               信任边界、漏洞报告和已知限制
 ```
 
 ## 开发和验证
@@ -420,6 +493,13 @@ uv run twine check dist/*
 
 不会。多用户或远程部署前必须放在可信 sidecar 边界后，并接入真正的签名审批
 服务。
+
+**任务合同是否证明 Agent 的行为真的服务用户目标？**
+
+不能。它确定性约束 Host 批准的工具、版本、来源、时限和预算；`objectiveDigest`
+只记录绑定了哪个可信目标，不表示 RiskProof 已经实现稳定的语义轨迹/动作 oracle。
+四安全性质的当前覆盖与空白见
+[`docs/research-foundations.md`](docs/research-foundations.md)。
 
 **它能自动推断完整 provenance 吗？**
 

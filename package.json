@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Risk-aware approval layer for high-risk AI Agent tool calls — provenance, taint, policy, proof",
+  "description": "Deterministic enforcement and evidence layer for MCP/AI Agent toolchains — identity, task authority, provenance, policy, proof",
   "keywords": [
     "agent-security",
     "approval",
@@ -42,6 +42,9 @@
     "lint": "npm run lint -w packages/riskproof",
     "check:versions": "node scripts/check-versions.mjs",
     "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "benchmark:security": "npm run build && node scripts/security-conformance.mjs",
+    "test:conformance": "npm run build && node scripts/security-conformance.mjs --format json",
+    "demo:research": "npm run build && node scripts/research-demo.mjs",
     "verify": "npm run check:versions && npm run lint && npm run build && npm run test:all",
     "start": "npm run serve",
     "demo": "node --import tsx/esm packages/riskproof/src/cli.ts demo",

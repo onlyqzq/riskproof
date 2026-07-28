@@ -1,9 +1,5 @@
 {
   "mcpServers": {
-    "your-business-tools": {
-      "command": "node",
-      "args": ["/path/to/your/mcp-server.js"]
-    },
     "business-tools-riskproof": {
       "command": "node",
       "args": [
