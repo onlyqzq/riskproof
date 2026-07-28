@@ -1,8 +1,8 @@
 # RiskProof
 
 RiskProof is a deterministic, risk-aware approval layer for high-risk AI Agent
-tool calls. Before an Agent sends email, makes an HTTP request, or executes a
-shell command, RiskProof combines argument provenance, taint labels,
+tool calls. Before an Agent sends email, makes an HTTP request, executes a
+command, writes a file, changes a database, or drives a browser, RiskProof combines argument provenance, taint labels,
 capabilities, invariants, and policy matches into an `allow`, `ask_approval`, or
 `block` decision and a structured audit proof.
 
@@ -20,27 +20,31 @@ Agent tool request
 Runtime validation ── invalid/unknown input ──▶ reject
        │
        ▼
-Provenance + taint + capability + invariant evidence
+Automatic MCP provenance + taint + capability + invariant evidence
        │
        ▼
-Deterministic policy engine (17 built-in match rules + config fallback)
+Deterministic policy engine (19 built-in match rules + config/OPA policies)
        │
        ├── allow ───────────────▶ tool may execute
        ├── ask_approval ────────▶ trusted human decision required
        └── block ───────────────▶ tool must not execute
        │
        ▼
-Redacted explanation + private JSON proof
+Redacted explanation + encrypted/signed audit proof (when configured)
 ```
 
-The security decision is deterministic. An LLM may improve wording, but it is
-not used as the final policy judge.
+The security decision is deterministic. An optional LLM adapter may improve
+redacted wording after the decision, but cannot change the policy result.
 
 Supported engine tools in `0.1.x`:
 
 - `send_email`
 - `http_request`
 - `shell_exec`
+- `file_read`
+- `file_write`
+- `database_query`
+- `browser_action`
 
 Unknown JSON-facing tools and malformed arguments fail closed. RiskProof does
 not execute real email, HTTP, or shell actions itself.
@@ -140,9 +144,10 @@ const result = evaluate({
 console.log(result.action, result.proof.proofId);
 ```
 
-The package uses one small runtime dependency, `re2js`, so custom policy
-patterns execute with linear-time RE2 semantics instead of JavaScript
-backtracking. YAML configuration is an optional peer feature; install `yaml` in
+Custom policy patterns use `re2js`, so they execute with linear-time RE2
+semantics instead of JavaScript backtracking. Compiled Rego policies run locally
+through the official `@open-policy-agent/opa-wasm` runtime. YAML configuration
+is an optional peer feature; install `yaml` in
 the consuming project when using `.yaml` or `.yml` configuration files.
 
 Because the registry package is not yet verified, create and test a local
@@ -170,7 +175,8 @@ JSON is the dependency-free configuration format. The canonical schema is
     "shell_exec": "medium"
   },
   "options": {
-    "defaultDecision": "deny"
+    "defaultDecision": "deny",
+    "locale": "en"
   },
   "rules": [
     {
@@ -210,6 +216,13 @@ Environment variables:
 | `RISKPROOF_HOST` | HTTP bind address | `127.0.0.1` |
 | `RISKPROOF_PORT` | HTTP port | `9090` |
 | `RISKPROOF_CORS_ORIGIN` | one exact allowed browser origin | CORS disabled |
+| `RISKPROOF_OPA_POLICY` | compiled OPA WASM path(s), `:` separated (`;` on Windows) | unset |
+| `RISKPROOF_PROOF_ENCRYPTION_KEY` / `_FILE` | current 32-byte AES key as `hex:`/`base64:` text, directly or from a secret file | unset |
+| `RISKPROOF_PROOF_SIGNING_KEY` / `_FILE` | current 32-byte HMAC key as `hex:`/`base64:` text, directly or from a secret file | unset |
+| `RISKPROOF_PROOF_REQUIRE_ENCRYPTION` | reject readable legacy/unencrypted proofs | `false` |
+| `RISKPROOF_PROOF_REQUIRE_SIGNATURE` | reject unsigned proofs | `false` |
+| `RISKPROOF_RETENTION_MAX_DAYS` | delete valid proofs older than N days | unset |
+| `RISKPROOF_RETENTION_MAX_RECORDS` | keep only the newest N valid proofs | unset |
 
 ## HTTP trust boundary
 
@@ -237,8 +250,28 @@ not strictly local.
 ## MCP proxy and approvals
 
 The stdio MCP proxy scans upstream tool definitions, removes poisoned tools
-from model-visible `tools/list`, conservatively maps remaining calls to the
-three engine tools, evaluates every `tools/call`, and stores redacted proofs.
+from model-visible `tools/list`, conservatively classifies remaining calls,
+evaluates every `tools/call`, and stores redacted proofs. It also indexes bounded
+content returned by `resources/read`, `prompts/get`, and successful `tools/call`
+responses. Later arguments are reverse-mapped by exact substring to semantic
+sources such as `webpage_1`, `email_2`, and `customer_data_1`; unmatched values
+are explicitly marked `agent_generated`. Raw indexed context is memory-only and
+is not exposed by diagnostics.
+
+For summaries or rewrites that no longer contain an exact source substring,
+trusted integrations can add monotonic argument flow edges:
+
+```json
+{
+  "tool": "file_write",
+  "args": { "source": "original", "content": "summary" },
+  "provenance": { "source": ["customer_data_1"] },
+  "flows": [{ "from": "source", "to": "content", "via": "agent_summary" }]
+}
+```
+
+Flows only add inherited source/taint evidence; they cannot clear existing
+evidence. MCP clients may supply the same array as `_meta.riskproof_flows`.
 Unclassified or unauthorized calls require approval rather than receiving a
 name-based automatic capability.
 
@@ -291,12 +324,14 @@ production key for a demo. The automated suite never invokes a real LLM.
 
 ## Built-in policy coverage
 
-The 17 built-in match rules cover:
+The 19 built-in match rules cover:
 
 - secret/API-key external email and HTTP exfiltration;
 - customer/PII/source-code/financial/patient data sent to external sinks;
 - suspicious shell pipelines, destructive commands, device redirects, and
   untrusted influence;
+- destructive/mutating database statements and untrusted influence over file,
+  database, or browser mutations;
 - untrusted recipient and shell provenance;
 - missing, expired, mismatched, or over-broad capabilities;
 - recipient and provenance allowlists;
@@ -305,16 +340,56 @@ The 17 built-in match rules cover:
 `options.defaultDecision="deny"` adds a fallback denial when no match rule
 fires. Shell detection is defense-in-depth, not a complete parser or sandbox.
 
+## OPA/Rego policy-as-code
+
+RiskProof can run one or more precompiled Rego WASM modules after its built-in
+rules. OPA results are aggregated monotonically: they may raise risk or tighten
+`allow` to `require_approval`/`deny`, but can never downgrade a built-in result.
+Malformed results and runtime failures deny by default; API users can opt into
+throwing failures during development.
+
+Compile a Rego entrypoint with the OPA CLI, extract `policy.wasm`, then load it:
+
+```bash
+opa build -t wasm -e riskproof/decision examples/policies/production-deploy.rego
+tar -xOf bundle.tar.gz /policy.wasm > policy.wasm
+riskproof check event.json --opa-policy policy.wasm
+```
+
+The entrypoint returns `false`, one match, or `{ "matches": [...] }`. Each match
+has `id`, `decision`, `riskLevel` (or `risk`), and optional `triggeredArgs`,
+`evidence`, and `reason`. See the exported `OpaPolicyEngine` and
+`evaluateWithOpa` APIs for data documents, named entrypoints, multiple modules,
+and application integrations. A complete source policy is included at
+[`examples/policies/production-deploy.rego`](examples/policies/production-deploy.rego).
+
+Maintainers can exercise the complete source Rego → compiled WASM → official
+JavaScript runtime path with `npm run test:opa`. The command requires the OPA
+CLI (`RISKPROOF_OPA_BIN` may point to a non-default binary), rebuilds the npm
+package, uses a temporary bundle, verifies matching and non-matching decisions,
+and checks that the resulting proof remains internally consistent. CI and the
+release workflow pin OPA v1.18.2 and verify the official Linux binary checksum.
+
 ## Proof storage
 
-Each evaluation stores a redacted JSON record under `YYYY-MM`. Writes use a
-private temporary file and an atomic no-overwrite commit. On POSIX filesystems,
+Each evaluation stores a redacted record under `YYYY-MM`. Writes use a private
+temporary file and an atomic no-overwrite commit. On POSIX filesystems,
 directories are forced to `0700` and proof files to `0600`.
 
-RiskProof does not yet implement encryption at rest, retention, tamper-evident
-signatures, remote replication, or storage quotas. Production operators must
-provide encrypted storage, capacity alerts, retention/rotation, backups, and
-access control. `/ready` fails if the proof directory cannot be written.
+`ProofStore` optionally wraps new records in an AES-256-GCM envelope and adds an
+HMAC-SHA-256 tamper-evident signature. Keys must be exactly 32 bytes and use an
+explicit `hex:` or `base64:` encoding; pass keys through secret files rather
+than command-line arguments. Read keyrings support safe encryption/signing key
+rotation, and strict modes can reject legacy, unencrypted, or unsigned records.
+Without strict mode, existing v0.1 plain JSON proofs remain readable for
+migration.
+
+Retention supports `maxAgeDays`, `maxRecords`, explicit `store.prune()`, and
+automatic pruning after saves. Corrupt or undecryptable files are reported but
+never automatically deleted, preserving evidence for incident response. Local
+encryption and signatures do not replace backups, remote replication, capacity
+monitoring, OS access control, or a real key-management service. `/ready` fails
+if the proof directory cannot be written.
 
 ## Docker
 
@@ -347,7 +422,7 @@ backup, smoke, and rollback instructions.
 packages/riskproof/       TypeScript engine, CLI, HTTP/MCP adapters and tests
 agent/                    Python SDK, demo, lockfile and tests
 test-workspace/           28 policy scenarios and mock MCP integration server
-scripts/                  version gate and reproducible benchmark
+scripts/                  version gate, benchmark, OPA and Docker release smokes
 .github/workflows/        CI and gated release preparation
 docs/                     architecture, Docker and publishing guidance
 PROJECT_AUDIT.md          architecture review and risk register
@@ -365,8 +440,10 @@ npm run check:versions
 npm run lint
 npm run build
 npm run test:all
+npm run test:opa       # requires the OPA CLI
 npm run test:coverage -w packages/riskproof
 npm audit --audit-level=high
+npm run test:docker    # requires the prebuilt release-candidate image
 
 # Python suite
 cd agent
@@ -395,8 +472,11 @@ service before multi-user or remote deployment.
 
 **Can it infer complete provenance automatically?**
 
-No. The engine evaluates provenance supplied by a trusted integration. The
-generic MCP adapter cannot reconstruct the complete LLM context graph.
+The MCP proxy automatically tracks server content and performs deterministic
+exact-substring reverse mapping. It intentionally does not guess across opaque
+LLM reasoning or lossy paraphrases. Integrations should declare additive
+`flows` for summaries/rewrites; direct JS/HTTP callers may still provide
+provenance explicitly.
 
 **Does `block` make shell execution safe?**
 
@@ -408,17 +488,20 @@ least privilege, isolation, egress controls, and operating-system auditing.
 Install the optional `yaml` peer dependency in the consuming Node project, or
 use JSON.
 
-**Why is Docker build not part of a local success result?**
+**How is the container release candidate verified?**
 
-Docker Compose files can be statically validated without a daemon, but an image
-build and runtime smoke require a running Docker daemon.
+Build the digest-pinned image as documented in `docs/docker.md`, then run
+`npm run test:docker`. The smoke verifies non-root/read-only execution, HTTP
+boundaries, encrypted and signed proofs, volume persistence, and graceful
+shutdown. A local pass is release evidence, not a substitute for the target
+Linux runner and production-volume rehearsal.
 
 ## Release status
 
 The source can be submitted for human acceptance after the checks in the four
 release reports. It must not be represented as publicly released until a release
-owner creates the initial Git commit and remote, enables protected CI and private
+owner reviews and commits this work, runs protected remote CI, enables private
 security reporting, confirms registry namespaces, configures OIDC trusted
-publishers, and completes the Docker smoke test.
+publishers, and completes the target-environment deployment rehearsal.
 
 License: Apache-2.0. See `LICENSE`.

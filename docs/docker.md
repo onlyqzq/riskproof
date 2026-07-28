@@ -16,8 +16,11 @@ docker build \
   -t riskproof:release-candidate .
 ```
 
-The image uses `node:22.20.0-alpine3.22`, `tini`, the non-root `node` user,
-`SIGTERM`, and `/ready` as its health check.
+The image uses
+`node:22.20.0-alpine3.22@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af`,
+`tini`, the non-root `node` user, `SIGTERM`, and `/ready` as its health check.
+Dependency-update PRs must update the tag and digest together and rerun the
+container smoke on every supported target architecture.
 
 ## Hardened local run
 
@@ -64,19 +67,53 @@ Mount a validated JSON config read-only and set `RISKPROOF_CONFIG`:
 ```yaml
 services:
   riskproof:
+    secrets:
+      - proof_encryption_key
+      - proof_signing_key
     volumes:
       - riskproof_proofs:/app/proofs
       - ./riskproof.json:/app/config/riskproof.json:ro
     environment:
       RISKPROOF_PROOF_DIR: /app/proofs
       RISKPROOF_CONFIG: /app/config/riskproof.json
+      RISKPROOF_PROOF_ENCRYPTION_KEY_FILE: /run/secrets/proof_encryption_key
+      RISKPROOF_PROOF_SIGNING_KEY_FILE: /run/secrets/proof_signing_key
+      RISKPROOF_PROOF_REQUIRE_ENCRYPTION: "true"
+      RISKPROOF_PROOF_REQUIRE_SIGNATURE: "true"
+      RISKPROOF_RETENTION_MAX_DAYS: "90"
+secrets:
+  proof_encryption_key:
+    file: ./secrets/proof-encryption-key
+  proof_signing_key:
+    file: ./secrets/proof-signing-key
 ```
 
+Each secret file contains one `hex:` or `base64:` value that decodes to exactly
+32 bytes. Keep encryption and signing keys distinct. Use a managed secret/KMS
+workflow in production, retain old read keys during rotation through the
+programmatic `ProofStore` keyring API, and test restore before retiring a key.
+
 Do not bake environment files, tokens, or production configuration into the
-image. YAML configuration requires the optional `yaml` npm peer and is not
-included in the minimal runtime image; use JSON in this container image.
+image. The official image includes the optional `yaml` peer so a read-only
+mounted YAML config behaves like a local installation; JSON remains the
+recommended dependency-free format.
 
 ## Health and smoke tests
+
+Maintainers can run the complete hardened runtime smoke after building the
+release candidate:
+
+```bash
+npm run test:docker
+```
+
+The script creates isolated, uniquely named containers and a temporary proof
+volume, then verifies non-root execution, read-only rootfs, dropped
+capabilities, HTTP limits, dangerous-call blocking and redaction, encrypted and
+signed `0600` proofs, decryption after container recreation, persistence, and a
+zero exit code after `SIGTERM`. It removes its containers, volume, and temporary
+keys whether the run passes or fails. Set `RISKPROOF_DOCKER_IMAGE` to test a
+different local tag.
 
 Liveness:
 
@@ -139,9 +176,10 @@ docker run --rm \
 docker start riskproof
 ```
 
-Store the archive encrypted, restrict access, and apply the organization's
-retention policy because proofs can contain sensitive metadata even after value
-redaction.
+Store the archive and the required historical decryption/verification keys in
+separate protected recovery systems. Restrict access and apply the
+organization's retention policy because proof metadata remains sensitive even
+when record payloads are encrypted.
 
 ## Restore
 

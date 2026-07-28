@@ -1,7 +1,7 @@
 {
   "name": "riskproof",
   "version": "0.1.0",
-  "description": "Risk-aware approval middleware for AI Agent tool calls — provenance tracking, taint analysis, 17 security policies, audit-proof generation. Plugs into any MCP-compatible agent.",
+  "description": "Risk-aware approval middleware for AI Agent tool calls — automatic provenance, taint analysis, 19 security policies, OPA/Rego, and protected audit proofs.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -33,6 +33,14 @@
       "import": "./dist/proof-store.js",
       "types": "./dist/proof-store.d.ts"
     },
+    "./provenance": {
+      "import": "./dist/provenance.js",
+      "types": "./dist/provenance.d.ts"
+    },
+    "./opa-policy": {
+      "import": "./dist/opa-policy.js",
+      "types": "./dist/opa-policy.d.ts"
+    },
     "./schema.json": "./dist/riskproof.schema.json",
     "./example-config.json": "./dist/riskproof.example.json"
   },
@@ -56,7 +64,11 @@
     "middleware",
     "audit-log",
     "security-policy",
-    "agent-framework"
+    "agent-framework",
+    "opa",
+    "rego",
+    "audit-proof",
+    "mcp-security"
   ],
   "repository": {
     "type": "git",
@@ -101,6 +113,7 @@
     "yaml": "^2.9.0"
   },
   "dependencies": {
+    "@open-policy-agent/opa-wasm": "^1.10.0",
     "re2js": "^2.8.6"
   }
 }

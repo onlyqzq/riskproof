@@ -11,6 +11,7 @@ export type {
   Capability, SafetyInvariant,
   AuditProof, TraceContext, UserAction,
   ProvenanceSource, ProvenanceEdge, ProvenanceGraph,
+  ProvenanceFlow,
 } from "./types.js";
 
 // Config
@@ -28,10 +29,45 @@ export {
 export { redactEngineOutput, redactedValue, sensitiveTaints, redactLogText } from "./redaction.js";
 
 // Engine
-export { evaluate, hasTaint, hasAnyTaint, getTaints } from "./engine.js";
+export {
+  evaluate,
+  hasTaint,
+  hasAnyTaint,
+  getTaints,
+} from "./engine.js";
+
+// OPA/Rego policy-as-code
+export { OpaPolicyEngine, evaluateWithOpa, OPA_MAX_WASM_BYTES } from "./opa-policy.js";
+export type { OpaPolicyOptions, OpaPolicyMatch } from "./opa-policy.js";
+
+// Automatic MCP context provenance
+export {
+  ContextTracker,
+  ProvenanceMapper,
+  CONTEXT_TRACKER_LIMITS,
+} from "./provenance.js";
+export type {
+  ContextEntry,
+  ContextEntryKind,
+  ContextTrackerOptions,
+  ProvenanceMapping,
+} from "./provenance.js";
 
 // Explainer
-export { formatCard, formatCompact, sanitizeTerminal, RULE_DB } from "./explainer.js";
+export {
+  formatCard,
+  formatCompact,
+  formatPolishedCard,
+  sanitizeTerminal,
+  RULE_DB,
+  RULE_DB_EN,
+} from "./explainer.js";
+export type {
+  ExplainerLocale,
+  FormatMetadata,
+  ExplanationPolisher,
+  PolishedExplanationOptions,
+} from "./explainer.js";
 
 // Proof Store
 export {
@@ -41,6 +77,7 @@ export {
   MAX_CORRUPT_DIAGNOSTICS,
   MAX_USER_NOTE_LENGTH,
   MAX_PROOF_FILE_BYTES,
+  parseProofKey,
 } from "./proof-store.js";
 export type {
   ProofRecord,
@@ -48,6 +85,10 @@ export type {
   ProofListResult,
   CorruptProofDiagnostic,
   CorruptProofKind,
+  ProofKeyInput,
+  ProofStoreOptions,
+  ProofRetentionPolicy,
+  ProofPruneResult,
 } from "./proof-store.js";
 
 // Proxy Server

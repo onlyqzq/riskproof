@@ -26,7 +26,7 @@ export interface RiskProofConfig {
   /** User-defined custom rules evaluated after built-in rules. */
   rules?: CustomRule[];
   /** Per-tool risk level override.
-   *  Keys are tool names ("send_email", "http_request", "shell_exec").
+   *  Keys are supported ToolName values.
    *  When set, the engine uses this risk level as a baseline for unmatched calls
    *  instead of the default "low". */
   toolRisk?: Record<string, "low" | "medium" | "high" | "critical">;
@@ -38,6 +38,8 @@ export interface ConfigOptions {
   /** Default decision for tool calls that don't match any rule.
    *  Built-in default is "allow"; set to "deny" for a deny-by-default posture. */
   defaultDecision?: "allow" | "deny";
+  /** Locale for interactive approval explanations. */
+  locale?: "zh-CN" | "en";
 }
 
 export interface CustomRule {
@@ -66,7 +68,10 @@ export interface CustomRule {
 const VALID_DECISIONS = new Set(["deny", "require_approval"]);
 const VALID_RISK_LEVELS = new Set(["low", "medium", "high", "critical"]);
 const VALID_CUSTOM_RISK_LEVELS = new Set(["high", "critical"]);
-const VALID_TOOLS = new Set(["send_email", "http_request", "shell_exec"]);
+const VALID_TOOLS = new Set([
+  "send_email", "http_request", "shell_exec", "file_read", "file_write",
+  "database_query", "browser_action",
+]);
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const OPTIONAL_CONFIG_KEYS = new Set([
   "$schema", "internalDomains", "rules", "toolRisk", "options",
@@ -112,6 +117,8 @@ const BUILT_IN_RULE_IDS = new Set([
   "untrusted_influenced_shell",
   "untrusted_provenance_email_to",
   "untrusted_provenance_shell",
+  "dangerous_database_query",
+  "untrusted_mutative_tool",
   "default_deny_config",
 ]);
 
@@ -186,11 +193,14 @@ export function validateConfig(raw: unknown): RiskProofConfig {
       throw new Error("Config 'options' must be an object");
     }
     const opts = obj.options as Record<string, unknown>;
-    rejectUnknownKeys(opts, new Set(["defaultDecision"]), "Config 'options'");
+    rejectUnknownKeys(opts, new Set(["defaultDecision", "locale"]), "Config 'options'");
     if (opts.defaultDecision !== undefined) {
       if (opts.defaultDecision !== "allow" && opts.defaultDecision !== "deny") {
         throw new Error(`Config 'options.defaultDecision' must be "allow" or "deny", got '${opts.defaultDecision}'`);
       }
+    }
+    if (opts.locale !== undefined && opts.locale !== "zh-CN" && opts.locale !== "en") {
+      throw new Error(`Config 'options.locale' must be "zh-CN" or "en"`);
     }
   }
 
@@ -314,6 +324,9 @@ export function validateConfig(raw: unknown): RiskProofConfig {
     toolRisk: obj.toolRisk as RiskProofConfig["toolRisk"],
     options: {
       defaultDecision: ((obj.options as Record<string, unknown> | undefined)?.defaultDecision as "allow" | "deny" | undefined) ?? "allow",
+      ...((obj.options as Record<string, unknown> | undefined)?.locale === undefined
+        ? {}
+        : { locale: (obj.options as Record<string, unknown>).locale as "zh-CN" | "en" }),
     },
   };
 }
@@ -484,7 +497,7 @@ function accountConfigCharacters(
 
 function isOptionalConfigProperty(parentPath: string, key: string): boolean {
   if (parentPath === "Config") return OPTIONAL_CONFIG_KEYS.has(key);
-  if (parentPath === "Config.options") return key === "defaultDecision";
+  if (parentPath === "Config.options") return key === "defaultDecision" || key === "locale";
   if (/^Config\.rules\[\d+\]$/.test(parentPath)) return OPTIONAL_RULE_KEYS.has(key);
   return false;
 }
@@ -560,7 +573,7 @@ export function loadConfig(path: string): RiskProofConfig {
       throw new Error(`Failed to parse JSON config at '${path}': ${e instanceof Error ? e.message : e}`);
     }
   } else if (ext === ".yaml" || ext === ".yml") {
-    // Dynamic import for optional YAML support — zero production dependencies
+    // Dynamic import keeps YAML optional for JSON-only consumers.
     try {
       // Use a require-style dynamic path so bundlers don't force yaml as a dep
       const yamlModule = requireYaml();

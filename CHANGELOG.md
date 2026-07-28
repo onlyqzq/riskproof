@@ -9,8 +9,20 @@ All notable changes are documented here following
 ### Added
 
 - Runtime validation for CLI, HTTP, MCP, and the public `evaluate()` boundary.
-- The `sensitive_data_external_http` policy, bringing the engine to 17 built-in
-  match rules plus the configurable default-deny fallback.
+- The `sensitive_data_external_http`, `dangerous_database_query`, and
+  `untrusted_mutative_tool` policies, bringing the engine to 19 built-in match
+  rules plus the configurable default-deny fallback.
+- Bounded MCP `ContextTracker` and `ProvenanceMapper` support for semantic,
+  exact-substring provenance across resources, prompts, and tool results, with
+  explicit `agent_generated` fallback and additive transformation `flows`.
+- OPA/Rego policy-as-code through the official OPA WASM runtime, with
+  monotonic multi-module aggregation and fail-closed result validation.
+- `file_read`, `file_write`, `database_query`, and `browser_action` engine tool
+  classes in addition to email, HTTP, and shell tools.
+- Consistent Chinese/English explanations and a vendor-neutral, redacted,
+  timeout-bounded optional LLM explanation-polisher interface.
+- AES-256-GCM proof envelopes, HMAC-SHA-256 integrity, read keyrings for key
+  rotation, strict protected-record modes, and age/count retention policies.
 - JSON Schema for version 1 configuration and schema/runtime consistency tests.
 - HTTP `/ready`, exact-origin opt-in CORS, security headers, 1 MiB body limits,
   content-type validation, and request/header/keep-alive timeouts.
@@ -21,6 +33,8 @@ All notable changes are documented here following
   package-build, and clean-install coverage.
 - Reproducible `npm run benchmark` microbenchmark for engine, proof writes, and
   local HTTP evaluation.
+- Reproducible `npm run test:opa` and `npm run test:docker` release smokes for
+  real Rego-to-WASM execution and hardened container runtime behavior.
 
 ### Changed
 
@@ -42,6 +56,11 @@ All notable changes are documented here following
 - Custom policy expressions now run on the linear-time `re2js` engine;
   backtracking-only JavaScript lookaround/backreference syntax is no longer
   accepted.
+- Proof storage remains backward-readable by default, while newly configured
+  stores can write authenticated encrypted envelopes and enforce strict reads.
+- The Docker base image is digest-pinned and the CI/release container smoke now
+  checks non-root/read-only execution, HTTP limits, protected proofs,
+  persistence, and graceful `SIGTERM` handling.
 
 ### Fixed
 
@@ -61,6 +80,8 @@ All notable changes are documented here following
   handling, request synchronization, DeepSeek endpoint selection, and import
   side effects now fail closed.
 - Demo failures now produce a non-zero process exit status.
+- Fixed the production image omitting `@open-policy-agent/opa-wasm` and its
+  runtime dependencies after OPA policy support was added.
 
 ### Security
 
@@ -70,12 +91,16 @@ All notable changes are documented here following
   context by default.
 - npm and Python dependency audits currently report no known third-party
   vulnerabilities in the resolved release candidate.
+- MCP response context is bounded and memory-only; metadata inspection never
+  returns the indexed raw content. Proof envelope verification uses constant-
+  time signature comparison, and unreadable evidence is never auto-pruned.
 
 ### Compatibility
 
 - Upgrading from the original dependency set requires Node 22+ and patched
-  LangGraph/LangChain 1.x. Public RiskProof decision and proof JSON remain on
-  version `0.1.0`; no database migration exists because storage is file-based.
+  LangGraph/LangChain 1.x. Public RiskProof decision JSON remains compatible.
+  File proofs require no forced migration: legacy JSON remains readable unless
+  an operator explicitly enables strict encryption/signature requirements.
 
 ## [0.1.0] — 2026-07-09
 

@@ -2,7 +2,7 @@
 // RiskProof — Policy Engine (v3 merged)
 // ============================================================================
 // Single entry point: evaluate(input) → output
-// Merges: provenance collection + taint analysis + 17 policy rules + adapter
+// Merges: provenance collection + taint analysis + 19 policy rules + adapter
 //
 // Policy decisions are deterministic. Proof time/IDs include trusted clock and
 // random uniqueness metadata. No IO. No LLM.
@@ -44,16 +44,24 @@ function buildArguments(
 // Part 2: Taint Analysis (was taint.ts)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const SOURCE_KIND_TO_TAINT: Record<string, TaintLabel> = {
-  webpage: "UNTRUSTED_WEB",
-  email: "UNTRUSTED_EMAIL",
-  tool_schema: "UNTRUSTED_TOOL_SCHEMA",
-};
+const SOURCE_KIND_TO_TAINT: Array<{ keywords: string[]; label: TaintLabel }> = [
+  { keywords: ["webpage", "browser_result", "web_result"], label: "UNTRUSTED_WEB" },
+  { keywords: ["email", "mailbox", "inbox_message"], label: "UNTRUSTED_EMAIL" },
+  { keywords: ["tool_schema", "mcp_schema"], label: "UNTRUSTED_TOOL_SCHEMA" },
+  { keywords: ["internal_doc", "internal_document", "knowledge_base", "company_wiki"], label: "INTERNAL_DOC" },
+  { keywords: ["customer_data", "customer_record", "crm_record", "client_record"], label: "CUSTOMER_DATA" },
+  { keywords: ["pii_record", "personal_data"], label: "PII" },
+  { keywords: ["secret_store", "credential", "vault_secret"], label: "SECRET" },
+  { keywords: ["api_key"], label: "API_KEY" },
+  { keywords: ["source_code", "repository_file"], label: "SOURCE_CODE" },
+  { keywords: ["financial_data", "financial_record", "bank_record"], label: "FINANCIAL_DATA" },
+  { keywords: ["patient_data", "patient_record", "medical_record", "clinical_record"], label: "PATIENT_DATA" },
+];
 
 function inferTaintsFromSource(sourceId: string): TaintLabel[] {
   const result: TaintLabel[] = [];
-  for (const [keyword, label] of Object.entries(SOURCE_KIND_TO_TAINT)) {
-    if (sourceId.toLowerCase().includes(keyword)) {
+  for (const { keywords, label } of SOURCE_KIND_TO_TAINT) {
+    if (keywords.some((keyword) => sourceId.toLowerCase().includes(keyword))) {
       result.push(label);
     }
   }
@@ -73,7 +81,48 @@ const SENSITIVE_PATTERNS: Array<{ label: TaintLabel; patterns: RegExp[] }> = [
     ],
   },
   { label: "CUSTOMER_DATA", patterns: [/\bcustomer\b/i, /\bclient\b/i, /客户/] },
-  { label: "PII", patterns: [/\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/, /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/] },
+  {
+    label: "PII",
+    patterns: [
+      /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/,
+      /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/,
+      /\b\d{3}-\d{2}-\d{4}\b/,
+      /\b[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]\b/,
+    ],
+  },
+  {
+    label: "INTERNAL_DOC",
+    patterns: [
+      /\b(?:company|internal)\s+(?:confidential|use only)\b/i,
+      /\bconfidential\s*[-:]\s*internal\b/i,
+      /内部(?:资料|文档|机密)|仅限内部/,
+    ],
+  },
+  {
+    label: "SOURCE_CODE",
+    patterns: [
+      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+      /\b(?:function|class|interface)\s+[A-Za-z_$][\w$]*\s*(?:\(|\{|extends\b)/,
+      /\b(?:import|export)\s+(?:[\w*{]|default\b).+\bfrom\s+["'][^"']+["']/,
+      /\b(?:def|class)\s+[A-Za-z_]\w*\s*(?:\(|:)/,
+    ],
+  },
+  {
+    label: "FINANCIAL_DATA",
+    patterns: [
+      /\b(?:bank\s+account|routing\s+number|iban|swift\/bic|credit\s+card)\b/i,
+      /\b(?:invoice|revenue|balance)\s*(?:id|number|amount)?\s*[#:=]\s*[^\s,;]+/i,
+      /银行账(?:号|户)|财务数据|发票(?:号|金额)/,
+    ],
+  },
+  {
+    label: "PATIENT_DATA",
+    patterns: [
+      /\b(?:patient|medical\s+record|diagnosis|prescription)\s*(?:id|number|name)?\s*[#:=]\s*[^\s,;]+/i,
+      /\b(?:hipaa|protected health information|clinical trial subject)\b/i,
+      /患者(?:编号|姓名|病历)|诊断结果|处方信息/,
+    ],
+  },
 ];
 
 function detectValueTaints(value: unknown): TaintLabel[] {
@@ -130,8 +179,47 @@ function enrichTaints(
   return result;
 }
 
+/**
+ * Additively propagates provenance and taints across explicit transformation
+ * edges. A bounded fixed-point handles chains and cycles without recursion.
+ */
+function propagateFlows(
+  args: Record<string, ArgumentEvidence>,
+  flows: EngineInput["flows"],
+): Record<string, ArgumentEvidence> {
+  if (!flows?.length) return args;
+  const result = Object.fromEntries(
+    Object.entries(args).map(([name, arg]) => [name, {
+      ...arg,
+      source: [...arg.source],
+      taints: [...arg.taints],
+    }]),
+  );
+  for (let pass = 0; pass < Object.keys(result).length; pass += 1) {
+    let changed = false;
+    for (const flow of flows) {
+      const source = result[flow.from];
+      const destination = result[flow.to];
+      if (!source || !destination) continue;
+      const sources = new Set(destination.source);
+      if (source.source.some((item) => item !== "agent_generated")) sources.delete("agent_generated");
+      const beforeSources = sources.size;
+      source.source.forEach((item) => sources.add(item));
+      const taints = new Set(destination.taints);
+      const beforeTaints = taints.size;
+      source.taints.forEach((item) => taints.add(item));
+      if (sources.size !== beforeSources || taints.size !== beforeTaints) {
+        result[flow.to] = { ...destination, source: [...sources], taints: [...taints] };
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return result;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// Part 3: Policy Rules (16 deterministic rules)
+// Part 3: Policy Rules (19 deterministic rules)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -187,7 +275,7 @@ function isExternalDomain(host: string, internalDomains?: string[]): boolean {
 
 function hasUntrustedProvenance(arg: ArgumentEvidence | undefined): string[] {
   const sources = new Set(arg?.source ?? []);
-  const untrusted = ["webpage", "email", "tool_output", "mcp_schema", "untrusted"];
+  const untrusted = ["webpage", "email", "tool_output", "mcp_prompt", "mcp_schema", "resource", "untrusted"];
   return [...sources].filter((s) => untrusted.some((k) => s.toLowerCase().includes(k)));
 }
 
@@ -202,6 +290,14 @@ const DANGEROUS_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: />\s*\/dev\/(?:tcp|udp|sd[a-z]\d*|vd[a-z]\d*|xvd[a-z]\d*|nvme\d+n\d+|mem|kmem)\b/i, label: "redirect to a device or network socket" },
   { re: /\bmkfifo\b/i, label: "mkfifo" },
   { re: /\bnc\s+-[lL]/i, label: "netcat listen mode" },
+];
+
+const DANGEROUS_DATABASE_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /\b(?:drop|truncate)\s+(?:table|database|schema)\b/i, label: "destructive DDL" },
+  { re: /\balter\s+(?:table|database|role|user)\b/i, label: "privileged ALTER" },
+  { re: /\b(?:grant|revoke)\s+\S+/i, label: "permission change" },
+  { re: /\bdelete\s+from\s+[^;]+(?:;|$)/i, label: "DELETE statement" },
+  { re: /\bupdate\s+\S+\s+set\s+[^;]+(?:;|$)/i, label: "UPDATE statement" },
 ];
 
 // ── Rule Definitions ───────────────────────────────────────────────────────────
@@ -417,8 +513,42 @@ const ruleUntrustedProvShell: RuleFn = (ctx) => {
   };
 };
 
+// Destructive or mutating database statements require a dedicated capability
+// model; until then they are denied instead of being treated as generic shell.
+const ruleDangerousDatabase: RuleFn = (ctx) => {
+  if (ctx.tool !== "database_query") return null;
+  const query = ctx.args.query ?? ctx.args.sql ?? ctx.args.statement;
+  const text = valueToSearchText(query?.value);
+  const matches = DANGEROUS_DATABASE_PATTERNS.filter(({ re }) => re.test(text)).map(({ label }) => label);
+  if (matches.length === 0) return null;
+  return {
+    id: "dangerous_database_query",
+    triggeredArgs: [ctx.args.query ? "query" : ctx.args.sql ? "sql" : "statement"],
+    evidence: [`database statement matches dangerous pattern(s): ${matches.join(", ")}`],
+    reason: `数据库语句包含破坏性或变更操作 (${matches.join(", ")})，默认禁止执行`,
+  };
+};
+
+const ruleUntrustedMutativeTool: RuleFn = (ctx) => {
+  if (!["file_write", "database_query", "browser_action"].includes(ctx.tool)) return null;
+  const triggeredArgs = Object.entries(ctx.args)
+    .filter(([, argument]) =>
+      hasAnyTaint(argument, UNTRUSTED_TAINTS) || hasUntrustedProvenance(argument).length > 0)
+    .map(([name]) => name);
+  if (triggeredArgs.length === 0) return null;
+  return {
+    id: "untrusted_mutative_tool",
+    triggeredArgs,
+    evidence: triggeredArgs.map((name) => `arg '${name}' is influenced by untrusted content`),
+    reason: `可变更系统状态的工具 ${ctx.tool} 受到不可信内容影响，可能是间接 prompt injection`,
+  };
+};
+
 // R8: High-risk tool without capability
-const HIGH_RISK_TOOLS: Set<string> = new Set(["send_email", "http_request", "shell_exec"]);
+const HIGH_RISK_TOOLS: Set<string> = new Set([
+  "send_email", "http_request", "shell_exec", "file_read", "file_write", "database_query",
+  "browser_action",
+]);
 
 const ruleNoCapability: RuleFn = (ctx) => {
   if (!HIGH_RISK_TOOLS.has(ctx.tool)) return null;
@@ -545,7 +675,9 @@ const ruleInvariantForbiddenTool: RuleFn = (ctx) => {
 };
 
 // R15: Safety invariant — protected taints modified
-const MUTATIVE_SINKS = new Set(["file_write", "http_request", "send_email", "shell_exec"]);
+const MUTATIVE_SINKS = new Set([
+  "file_write", "http_request", "send_email", "shell_exec", "database_query", "browser_action",
+]);
 
 const ruleInvariantProtectedTaint: RuleFn = (ctx) => {
   if (!MUTATIVE_SINKS.has(ctx.tool)) return null;
@@ -620,6 +752,7 @@ const ALL_RULES: RuleFn[] = [
   ruleSecretExternalEmail,
   ruleSecretExternalHttp,
   ruleDangerousShell,
+  ruleDangerousDatabase,
   // Require-approval rules
   ruleNoCapability,
   ruleProvenanceNotAllowed,
@@ -628,6 +761,7 @@ const ALL_RULES: RuleFn[] = [
   ruleUntrustedShell,
   ruleUntrustedEmailTo,
   ruleUntrustedProvShell,
+  ruleUntrustedMutativeTool,
 ];
 
 // ── Decision/Risk Mapping per Rule ──────────────────────────────────────────────
@@ -639,11 +773,12 @@ function ruleDecision(id: string, customRules?: CustomRule[]): Decision {
     "capability_expired", "capability_forbidden_taint",
     "capability_recipient_domain_not_allowed",
     "secret_external_send", "secret_external_http", "dangerous_shell_pattern",
+    "dangerous_database_query",
   ];
   const reviewRules = [
     "high_risk_tool_requires_capability", "capability_provenance_not_allowed",
     "customer_data_external_send", "sensitive_data_external_http", "untrusted_influenced_shell",
-    "untrusted_provenance_email_to", "untrusted_provenance_shell",
+    "untrusted_provenance_email_to", "untrusted_provenance_shell", "untrusted_mutative_tool",
   ];
   if (denyRules.includes(id)) return "deny";
   if (reviewRules.includes(id)) return "require_approval";
@@ -654,14 +789,15 @@ function ruleDecision(id: string, customRules?: CustomRule[]): Decision {
 
 function ruleRisk(id: string, customRules?: CustomRule[]): RiskLevel {
   const critical = ["invariant_protected_taint_modified", "capability_tool_mismatch",
-    "capability_forbidden_taint", "secret_external_send", "secret_external_http", "dangerous_shell_pattern"];
+    "capability_forbidden_taint", "secret_external_send", "secret_external_http",
+    "dangerous_shell_pattern", "dangerous_database_query"];
   if (critical.includes(id)) return "critical";
   const builtInHigh = [
     "invariant_forbidden_tool", "invariant_numeric_range_violation", "capability_expired",
     "capability_recipient_domain_not_allowed", "high_risk_tool_requires_capability",
     "capability_provenance_not_allowed", "customer_data_external_send",
     "sensitive_data_external_http", "untrusted_influenced_shell",
-    "untrusted_provenance_email_to", "untrusted_provenance_shell",
+    "untrusted_provenance_email_to", "untrusted_provenance_shell", "untrusted_mutative_tool",
   ];
   if (builtInHigh.includes(id)) return "high";
   const customRule = customRules?.find((r) => r.enabled !== false && r.id === id);
@@ -772,6 +908,50 @@ const DECISION_TO_ACTION: Record<Decision, EngineOutput["action"]> = {
   deny: "block",
 };
 
+export interface AdditionalPolicyDecision {
+  policy: MatchedPolicy;
+  decision: Decision;
+  riskLevel: RiskLevel;
+}
+
+/**
+ * Monotonically merges policy-as-code results with the deterministic built-in
+ * evaluation. Additional policy modules can make a result stricter, never less
+ * strict, and a new internally consistent proof is generated for the aggregate.
+ */
+export function mergePolicyDecisions(
+  output: EngineOutput,
+  additional: readonly AdditionalPolicyDecision[],
+): EngineOutput {
+  if (additional.length === 0) return output;
+  let decision = output.decision;
+  let riskLevel = output.riskLevel;
+  for (const match of additional) {
+    if (DECISION_ORDER[match.decision] > DECISION_ORDER[decision]) decision = match.decision;
+    if (RISK_ORDER[match.riskLevel] > RISK_ORDER[riskLevel]) riskLevel = match.riskLevel;
+  }
+  const matchedPolicies = [
+    ...output.matchedPolicies,
+    ...additional.map(({ policy }) => policy),
+  ];
+  const proof = generateProof(
+    output.proof.tool,
+    decision,
+    riskLevel,
+    matchedPolicies,
+    output.proof.timestamp,
+    { traceId: output.proof.traceId, stepId: output.proof.stepId },
+  );
+  return {
+    ...output,
+    action: DECISION_TO_ACTION[decision],
+    decision,
+    riskLevel,
+    matchedPolicies,
+    proof,
+  };
+}
+
 /**
  * Main entry point. Takes an EngineInput, runs the full pipeline, returns EngineOutput.
  * The policy decision is deterministic for the same input/config. Proof IDs
@@ -796,13 +976,17 @@ export function evaluate(rawInput: EngineInput, config?: RiskProofConfig): Engin
   const args = buildArguments(input.args, input.provenance, input.taints);
 
   // Step 2: Enrich taints (source inference + value detection)
-  const enrichedArgs = enrichTaints(args, input.taints);
+  const enrichedArgs = propagateFlows(enrichTaints(args, input.taints), input.flows);
 
   // Step 3: Mark sink arguments
   const sinks: Record<ToolName, string[]> = {
     send_email: ["to", "cc", "bcc"],
     http_request: ["url"],
     shell_exec: ["command"],
+    file_read: ["path"],
+    file_write: ["path", "content"],
+    database_query: ["query", "sql", "statement"],
+    browser_action: ["url", "selector", "text"],
   };
   for (const argName of sinks[input.tool]) {
     if (enrichedArgs[argName]) {

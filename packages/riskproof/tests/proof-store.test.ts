@@ -19,6 +19,7 @@ import {
   MAX_PROOF_FILE_BYTES,
   MAX_USER_NOTE_LENGTH,
   ProofStore,
+  parseProofKey,
 } from "../src/proof-store.js";
 
 const tempDirs: string[] = [];
@@ -149,7 +150,7 @@ describe("ProofStore", () => {
       { decison: "deny" },
       { decision: "deni" },
       { action: "permit" },
-      { tool: "file_write" },
+      { tool: "file_delete" },
       { riskLevel: "severe" },
       { limit: "2" },
     ]) {
@@ -320,6 +321,112 @@ describe("ProofStore", () => {
     const listed = store.listDetailed();
     expect(listed.records).toEqual([]);
     expect(listed.corrupt).toEqual([expect.objectContaining({ kind: "invalid_record" })]);
+  });
+
+  it("encrypts with AES-256-GCM, signs with HMAC-SHA-256, and reads the envelope", () => {
+    const baseDir = tempDir();
+    const encryptionKey = Buffer.alloc(32, 0x11);
+    const signingKey = Buffer.alloc(32, 0x22);
+    const store = new ProofStore({ baseDir, encryptionKey, signingKey });
+    const output = secretResult();
+    const file = store.save(output, "reject");
+    const serialized = readFileSync(file, "utf-8");
+    const envelope = JSON.parse(serialized);
+
+    expect(envelope).toMatchObject({
+      format: "riskproof.proof.v1",
+      encryption: { algorithm: "aes-256-gcm" },
+      integrity: { algorithm: "hmac-sha256" },
+    });
+    expect(serialized).not.toContain("attacker@evil.example");
+    expect(serialized).not.toContain("[REDACTED:");
+    expect(store.load(output.proof.proofId)?.userDecision).toBe("reject");
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it("detects signed-envelope tampering before decryption", () => {
+    const baseDir = tempDir();
+    const store = new ProofStore({
+      baseDir,
+      encryptionKey: Buffer.alloc(32, 0x31),
+      signingKey: Buffer.alloc(32, 0x32),
+    });
+    const output = secretResult();
+    const file = store.save(output);
+    const envelope = JSON.parse(readFileSync(file, "utf-8"));
+    envelope.payload = `${envelope.payload[0] === "A" ? "B" : "A"}${envelope.payload.slice(1)}`;
+    writeFileSync(file, JSON.stringify(envelope));
+
+    expect(store.load(output.proof.proofId)).toBeNull();
+    expect(store.listDetailed().corrupt).toEqual([
+      expect.objectContaining({ kind: "integrity_error", reason: "Proof signature verification failed" }),
+    ]);
+  });
+
+  it("fails authenticated decryption with the wrong key and supports rotation keyrings", () => {
+    const baseDir = tempDir();
+    const oldEncryption = Buffer.alloc(32, 0x41);
+    const oldSigning = Buffer.alloc(32, 0x42);
+    const output = secretResult();
+    new ProofStore({ baseDir, encryptionKey: oldEncryption, signingKey: oldSigning }).save(output);
+
+    const wrong = new ProofStore({
+      baseDir,
+      encryptionKey: Buffer.alloc(32, 0x43),
+      signingKey: Buffer.alloc(32, 0x44),
+    });
+    expect(wrong.listDetailed().corrupt[0]?.kind).toBe("integrity_error");
+
+    const rotated = new ProofStore({
+      baseDir,
+      encryptionKey: Buffer.alloc(32, 0x45),
+      signingKey: Buffer.alloc(32, 0x46),
+      decryptionKeys: [oldEncryption],
+      verificationKeys: [oldSigning],
+    });
+    expect(rotated.load(output.proof.proofId)?.proofId).toBe(output.proof.proofId);
+  });
+
+  it("can require encrypted and signed records while retaining legacy compatibility by default", () => {
+    const baseDir = tempDir();
+    const output = secretResult();
+    new ProofStore(baseDir).save(output);
+    const strict = new ProofStore({
+      baseDir,
+      encryptionKey: Buffer.alloc(32, 0x51),
+      signingKey: Buffer.alloc(32, 0x52),
+      requireEncryption: true,
+      requireSignature: true,
+    });
+    expect(strict.load(output.proof.proofId)).toBeNull();
+    expect(strict.listDetailed().corrupt[0]?.kind).toBe("decryption_error");
+    expect(new ProofStore(baseDir).load(output.proof.proofId)).not.toBeNull();
+  });
+
+  it("applies age and count retention without deleting corrupt evidence", () => {
+    const baseDir = tempDir();
+    const store = new ProofStore({
+      baseDir,
+      retention: { maxAgeDays: 30, maxRecords: 1 },
+      clock: () => new Date("2026-07-17T00:00:00.000Z"),
+    });
+    store.save(resultAt("2026-05-01T00:00:00.000Z"));
+    store.save(resultAt("2026-07-15T00:00:00.000Z"));
+    store.save(resultAt("2026-07-16T00:00:00.000Z"));
+    writeFileSync(resolve(baseDir, "2026-07", "corrupt.json"), "not json");
+
+    expect(store.prune()).toEqual({ deleted: 2, kept: 1, corrupt: 1 });
+    expect(store.list().map(({ timestamp }) => timestamp)).toEqual(["2026-07-16T00:00:00.000Z"]);
+    expect(readFileSync(resolve(baseDir, "2026-07", "corrupt.json"), "utf-8")).toBe("not json");
+  });
+
+  it("validates key encodings and retention settings", () => {
+    expect(parseProofKey(`hex:${"ab".repeat(32)}`)).toHaveLength(32);
+    expect(parseProofKey(`base64:${Buffer.alloc(32, 7).toString("base64")}`)).toHaveLength(32);
+    expect(() => parseProofKey("plain-text-secret")).toThrow(/prefix/);
+    expect(() => parseProofKey("hex:abcd")).toThrow(/64 hexadecimal/);
+    expect(() => new ProofStore({ baseDir: tempDir(), retention: {} })).toThrow(/must define/);
+    expect(() => new ProofStore({ baseDir: tempDir(), pruneOnSave: true })).toThrow(/requires a retention/);
   });
 
 });

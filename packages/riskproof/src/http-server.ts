@@ -12,10 +12,11 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { evaluate } from "./engine.js";
-import { ProofStore } from "./proof-store.js";
+import { ProofStore, type ProofStoreOptions } from "./proof-store.js";
 import { InputValidationError, parseEngineInput } from "./validation.js";
 import { redactEngineOutput } from "./redaction.js";
 import { VERSION } from "./version.js";
+import { evaluateWithOpa, type OpaPolicyEngine } from "./opa-policy.js";
 import type { RiskProofConfig } from "./config.js";
 import type { EngineOutput } from "./types.js";
 
@@ -31,6 +32,10 @@ export interface HttpServerOptions {
   /** Accept caller-supplied capability/invariants/options. Unsafe for untrusted callers. */
   trustRequestContext?: boolean;
   logger?: (message: string) => void;
+  /** Precompiled Rego/OPA WASM modules, aggregated after built-in policies. */
+  opaPolicies?: readonly OpaPolicyEngine[];
+  /** Encryption, signing, and retention settings for audit proofs. */
+  proofStoreOptions?: Omit<ProofStoreOptions, "baseDir">;
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -140,6 +145,7 @@ async function handleEvaluate(
   config?: RiskProofConfig,
   corsOrigin?: string,
   trustRequestContext = false,
+  opaPolicies: readonly OpaPolicyEngine[] = [],
 ): Promise<void> {
   const contentType = req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
@@ -185,7 +191,9 @@ async function handleEvaluate(
     return error(res, "options.referenceTime is not accepted over HTTP", 400, corsOrigin);
   }
 
-  const result: EngineOutput = evaluate(input, config);
+  const result: EngineOutput = opaPolicies.length > 0
+    ? evaluateWithOpa(input, opaPolicies, config)
+    : evaluate(input, config);
 
   // Save proof
   proofStore.save(result);
@@ -226,7 +234,7 @@ function handleReadiness(
 export function startHttpServer(opts: HttpServerOptions = {}): Server {
   const port = opts.port ?? DEFAULT_PORT;
   const host = opts.host ?? DEFAULT_HOST;
-  const proofStore = new ProofStore(opts.proofDir);
+  const proofStore = new ProofStore({ ...opts.proofStoreOptions, baseDir: opts.proofDir });
   const corsOrigin = normalizeCorsOrigin(opts.corsOrigin);
   const log = opts.logger ?? ((message: string) => process.stderr.write(message + "\n"));
 
@@ -250,6 +258,7 @@ export function startHttpServer(opts: HttpServerOptions = {}): Server {
           opts.config,
           corsOrigin,
           opts.trustRequestContext,
+          opts.opaPolicies,
         );
       } else if (url === "/health" && method === "GET") {
         handleHealth(res, corsOrigin);

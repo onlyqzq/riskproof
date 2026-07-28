@@ -14,7 +14,7 @@ const httpCapability = { tool: "http_request" as const };
 
 describe("security regression coverage", () => {
   it("fails closed for an unsupported runtime tool", () => {
-    expect(() => evaluate({ tool: "file_write", args: { path: "/tmp/x" } } as unknown as EngineInput))
+    expect(() => evaluate({ tool: "file_delete", args: { path: "/tmp/x" } } as unknown as EngineInput))
       .toThrow(InputValidationError);
   });
 

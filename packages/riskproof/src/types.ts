@@ -4,7 +4,14 @@
 // Single-source-of-truth type definitions for the entire pipeline.
 // Eliminates the old ToolCall/PolicyInput/ApprovalProof/PolicyProof duality.
 
-export type ToolName = "send_email" | "http_request" | "shell_exec";
+export type ToolName =
+  | "send_email"
+  | "http_request"
+  | "shell_exec"
+  | "file_read"
+  | "file_write"
+  | "database_query"
+  | "browser_action";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
@@ -52,6 +59,8 @@ export interface EngineInput {
   provenance?: Record<string, string[]>;
   /** Per-argument taint declarations */
   taints?: Record<string, TaintLabel[]>;
+  /** Explicit argument-to-argument data-flow edges for transformed values. */
+  flows?: ProvenanceFlow[];
   /** Agent capability binding */
   capability?: Capability;
   /** Safety invariants (always enforced) */
@@ -60,6 +69,18 @@ export interface EngineInput {
   trace?: TraceContext;
   /** Engine options */
   options?: EngineOptions;
+}
+
+/**
+ * Declares that the value of one argument influenced another argument.
+ *
+ * This is deliberately additive: a flow can only propagate provenance and
+ * taints to the destination; it can never remove evidence already present.
+ */
+export interface ProvenanceFlow {
+  from: string;
+  to: string;
+  via?: string;
 }
 
 export interface EngineOptions {

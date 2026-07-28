@@ -31,7 +31,11 @@
       "properties": {
         "send_email": { "$ref": "#/$defs/riskLevel" },
         "http_request": { "$ref": "#/$defs/riskLevel" },
-        "shell_exec": { "$ref": "#/$defs/riskLevel" }
+        "shell_exec": { "$ref": "#/$defs/riskLevel" },
+        "file_read": { "$ref": "#/$defs/riskLevel" },
+        "file_write": { "$ref": "#/$defs/riskLevel" },
+        "database_query": { "$ref": "#/$defs/riskLevel" },
+        "browser_action": { "$ref": "#/$defs/riskLevel" }
       }
     },
     "options": {
@@ -41,6 +45,10 @@
         "defaultDecision": {
           "enum": ["allow", "deny"],
           "default": "allow"
+        },
+        "locale": {
+          "enum": ["zh-CN", "en"],
+          "description": "Locale used for interactive risk explanations."
         }
       }
     },
@@ -87,6 +95,8 @@
               "untrusted_influenced_shell",
               "untrusted_provenance_email_to",
               "untrusted_provenance_shell",
+              "dangerous_database_query",
+              "untrusted_mutative_tool",
               "default_deny_config"
             ]
           }
@@ -96,7 +106,7 @@
           "maxLength": 65536
         },
         "tool": {
-          "enum": ["*", "send_email", "http_request", "shell_exec"],
+          "enum": ["*", "send_email", "http_request", "shell_exec", "file_read", "file_write", "database_query", "browser_action"],
           "default": "*"
         },
         "field": {

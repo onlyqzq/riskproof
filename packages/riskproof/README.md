@@ -1,8 +1,8 @@
 # riskproof
 
 Deterministic risk evaluation and approval proofs for AI Agent tool calls.
-RiskProof validates and evaluates `send_email`, `http_request`, and `shell_exec`
-requests before a real integration executes them.
+RiskProof validates and evaluates email, HTTP, shell, file, database, and
+browser tool requests before a real integration executes them.
 
 Requires Node.js 22 or newer.
 
@@ -30,7 +30,7 @@ console.log(result.proof.proofId);
 ```
 
 Unknown JSON-facing tools and malformed arguments fail closed. The engine has
-17 built-in match rules plus a configurable default-deny fallback. It does not
+19 built-in match rules plus configurable default-deny and OPA/Rego policies. It does not
 execute email, HTTP, or shell actions.
 
 ## CLI
@@ -40,6 +40,7 @@ riskproof --help
 riskproof check event.json --pretty
 riskproof serve --host 127.0.0.1 --port 9090
 riskproof proxy --no-interactive --upstream <mcp-server-command...>
+riskproof check event.json --opa-policy compiled-policy.wasm
 riskproof validate-config riskproof.json
 ```
 
@@ -92,6 +93,9 @@ is exported as `riskproof/example-config.json`.
 The proxy removes poisoned tool definitions from model-visible `tools/list` and
 retains a quarantine cache so direct calls remain blocked. It exposes a
 side-effect-free `riskproof/evaluate` method for two-phase Agent approval.
+It builds a bounded in-memory index from MCP resources, prompts, and tool
+results; later argument values receive semantic provenance IDs by exact
+substring matching, with `agent_generated` used for unmatched values.
 
 Unsigned `_meta.riskproof_user_decision` is rejected by default. The
 `--allow-client-decisions` switch is only for an explicitly trusted, local MVP
@@ -101,8 +105,11 @@ process chain and is not a signed human-approval token.
 
 Detected secrets, API keys, PII, customer data, source code, financial data,
 and patient data are redacted from stored proofs and user-facing output. Proof
-directories/files use `0700`/`0600` on POSIX filesystems. Operators still need
-encrypted storage, retention, backup, capacity monitoring, and access control.
+directories/files use `0700`/`0600` on POSIX filesystems. `ProofStore` can
+encrypt new records with AES-256-GCM, sign them with HMAC-SHA-256, read old keys
+during rotation, require protected envelopes, and enforce age/count retention.
+Operators still need external key management, backup/replication, capacity
+monitoring, and OS access control.
 
 ## Development
 
@@ -111,6 +118,7 @@ From the monorepo root:
 ```bash
 npm ci
 npm run verify
+npm run test:opa # requires the OPA CLI; compiles and executes the example Rego WASM
 npm run test:coverage -w packages/riskproof
 ```
 

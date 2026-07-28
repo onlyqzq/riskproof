@@ -9,6 +9,7 @@ import type {
   Capability,
   EngineInput,
   EngineOptions,
+  ProvenanceFlow,
   SafetyInvariant,
   TaintLabel,
   ToolName,
@@ -21,6 +22,10 @@ export const SUPPORTED_TOOLS: readonly ToolName[] = [
   "send_email",
   "http_request",
   "shell_exec",
+  "file_read",
+  "file_write",
+  "database_query",
+  "browser_action",
 ];
 
 export const TAINT_LABELS: readonly TaintLabel[] = [
@@ -41,7 +46,7 @@ const TOOL_SET = new Set<string>(SUPPORTED_TOOLS);
 const TAINT_SET = new Set<string>(TAINT_LABELS);
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const OPTIONAL_INPUT_KEYS = new Set([
-  "provenance", "taints", "capability", "invariants", "trace", "options",
+  "provenance", "taints", "flows", "capability", "invariants", "trace", "options",
 ]);
 const OPTIONAL_CAPABILITY_KEYS = new Set([
   "allowedRecipientDomains", "forbiddenTaints", "allowedProvenance", "expiresAt",
@@ -105,17 +110,19 @@ export function parseEngineInput(raw: unknown): EngineInput {
   const taintsValue = input.taints === undefined
     ? undefined
     : taintMap(input.taints, "taints");
+  const flows = input.flows === undefined ? undefined : parseFlows(input.flows);
   const invariants = input.invariants === undefined
     ? undefined
     : parseInvariants(input.invariants);
 
-  rejectOrphanArgumentMetadata(args, provenance, taintsValue, invariants);
+  rejectOrphanArgumentMetadata(args, provenance, taintsValue, flows, invariants);
 
   return {
     tool,
     args,
     ...(provenance === undefined ? {} : { provenance }),
     ...(taintsValue === undefined ? {} : { taints: taintsValue }),
+    ...(flows === undefined ? {} : { flows }),
     ...(input.capability === undefined
       ? {}
       : { capability: parseCapability(input.capability) }),
@@ -123,6 +130,22 @@ export function parseEngineInput(raw: unknown): EngineInput {
     ...(input.trace === undefined ? {} : { trace: parseTrace(input.trace) }),
     ...(input.options === undefined ? {} : { options: parseOptions(input.options) }),
   };
+}
+
+function parseFlows(value: unknown): ProvenanceFlow[] {
+  if (!Array.isArray(value)) fail("flows must be an array");
+  return value.map((item, index) => {
+    const flow = record(item, `flows[${index}]`);
+    rejectUnknownFields(flow, new Set(["from", "to", "via"]), `flows[${index}]`);
+    const from = string(flow.from, `flows[${index}].from`);
+    const to = string(flow.to, `flows[${index}].to`);
+    if (!from || !to) fail(`flows[${index}] from/to must be non-empty`);
+    return {
+      from,
+      to,
+      ...(flow.via === undefined ? {} : { via: string(flow.via, `flows[${index}].via`) }),
+    };
+  });
 }
 
 /**
@@ -511,6 +534,7 @@ function rejectOrphanArgumentMetadata(
   args: Record<string, unknown>,
   provenance?: Record<string, string[]>,
   taintsValue?: Record<string, TaintLabel[]>,
+  flows?: ProvenanceFlow[],
   invariants?: SafetyInvariant[],
 ): void {
   const assertArgumentExists = (key: string, path: string): void => {
@@ -525,6 +549,11 @@ function rejectOrphanArgumentMetadata(
   for (const key of Object.keys(taintsValue ?? {})) {
     assertArgumentExists(key, `taints.${key}`);
   }
+  flows?.forEach((flow, index) => {
+    assertArgumentExists(flow.from, `flows[${index}].from`);
+    assertArgumentExists(flow.to, `flows[${index}].to`);
+    if (flow.from === flow.to) fail(`flows[${index}] must not be a self-reference`);
+  });
   invariants?.forEach((invariant, index) => {
     for (const key of Object.keys(invariant.maxValues ?? {})) {
       assertArgumentExists(key, `invariants[${index}].maxValues.${key}`);

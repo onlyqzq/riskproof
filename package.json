@@ -33,6 +33,8 @@
     "test:scenarios": "tsx test-workspace/scripts/run-all-tests.ts",
     "test:scenarios:cli": "tsx test-workspace/scripts/run-all-tests.ts --cli",
     "test:proxy": "tsx test-workspace/scripts/test-via-proxy.ts",
+    "test:opa": "npm run build && node scripts/test-opa-wasm.mjs",
+    "test:docker": "node scripts/test-docker.mjs",
     "test:integration": "npm run test:scenarios && npm run test:scenarios:cli && npm run test:proxy",
     "test:all": "npm run test:unit && npm run test:integration",
     "build": "npm run build -w packages/riskproof",

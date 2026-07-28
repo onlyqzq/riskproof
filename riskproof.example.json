@@ -11,11 +11,16 @@
   "toolRisk": {
     "shell_exec": "medium",
     "http_request": "low",
-    "send_email": "medium"
+    "send_email": "medium",
+    "file_read": "low",
+    "file_write": "medium",
+    "database_query": "high",
+    "browser_action": "medium"
   },
 
   "options": {
-    "defaultDecision": "allow"
+    "defaultDecision": "allow",
+    "locale": "zh-CN"
   },
 
   "rules": [

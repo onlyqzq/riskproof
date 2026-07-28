@@ -21,21 +21,25 @@ Agent 工具调用
 Provenance + Taint + Capability + Invariant
       │
       ▼
-确定性策略引擎（17 条内建匹配规则 + 配置兜底）
+确定性策略引擎（19 条内建匹配规则 + 配置/OPA 策略）
       │
       ├── allow ───────────────▶ 可以进入工具执行阶段
       ├── ask_approval ────────▶ 等待可信人工决定
       └── block ───────────────▶ 禁止执行
       │
       ▼
-脱敏解释 + 私有 JSON proof
+脱敏解释 + 可选加密/签名 proof
 ```
 
-LLM 可以辅助润色解释，但不负责最终安全裁决。`0.1.x` 引擎只支持：
+可选 LLM 适配器只能在决策完成后润色已脱敏文本，不能改变安全裁决。`0.1.x` 引擎支持：
 
 - `send_email`
 - `http_request`
 - `shell_exec`
+- `file_read`
+- `file_write`
+- `database_query`
+- `browser_action`
 
 JSON 边界遇到未知工具或错误参数时会失败关闭。RiskProof 本身不会真正发送
 邮件、请求网络或执行 Shell。
@@ -161,7 +165,8 @@ JSON 是零依赖配置格式。规范文件为
     "shell_exec": "medium"
   },
   "options": {
-    "defaultDecision": "deny"
+    "defaultDecision": "deny",
+    "locale": "zh-CN"
   },
   "rules": [
     {
@@ -197,6 +202,13 @@ node packages/riskproof/dist/cli.js serve --config riskproof.example.json
 | `RISKPROOF_HOST` | HTTP 监听地址 | `127.0.0.1` |
 | `RISKPROOF_PORT` | HTTP 端口 | `9090` |
 | `RISKPROOF_CORS_ORIGIN` | 唯一允许的浏览器 Origin | 默认关闭 CORS |
+| `RISKPROOF_OPA_POLICY` | 编译后的 OPA WASM 路径；Unix 用 `:`、Windows 用 `;` 分隔多个路径 | 未设置 |
+| `RISKPROOF_PROOF_ENCRYPTION_KEY` / `_FILE` | `hex:`/`base64:` 编码的 32 字节 AES 密钥 | 未设置 |
+| `RISKPROOF_PROOF_SIGNING_KEY` / `_FILE` | `hex:`/`base64:` 编码的 32 字节 HMAC 密钥 | 未设置 |
+| `RISKPROOF_PROOF_REQUIRE_ENCRYPTION` | 拒绝读取未加密或旧版明文 proof | `false` |
+| `RISKPROOF_PROOF_REQUIRE_SIGNATURE` | 拒绝读取未签名 proof | `false` |
+| `RISKPROOF_RETENTION_MAX_DAYS` | 删除超过 N 天的有效 proof | 未设置 |
+| `RISKPROOF_RETENTION_MAX_RECORDS` | 只保留最新 N 条有效 proof | 未设置 |
 
 ## HTTP 信任边界
 
@@ -222,9 +234,16 @@ TLS、限流、请求配额和网络策略。
 ## MCP 代理和审批
 
 stdio MCP 代理会扫描上游工具定义，把被投毒工具从模型可见的 `tools/list` 中
-移除；隔离缓存仍保留，所以直接调用也会被阻断。其余工具会保守映射到三种
-引擎工具，未分类或没有可信 capability 的调用进入审批，不会再根据“看起来像
-只读”的名称自动授权。
+移除；隔离缓存仍保留，所以直接调用也会被阻断。其余工具会保守分类；未分类
+或没有可信 capability 的调用进入审批，不会根据“看起来像只读”的名称自动授权。
+
+代理会为 `resources/read`、`prompts/get` 和成功的 `tools/call` 返回内容建立有界
+内存索引。后续参数通过精确子串反查自动得到 `webpage_1`、`email_2`、
+`customer_data_1` 等语义来源；没有命中的参数明确标为 `agent_generated`。原始
+上下文不落盘，也不会通过诊断接口暴露。摘要或改写造成精确文本消失时，可信
+集成可声明 `flows: [{"from":"source","to":"summary","via":"agent_summary"}]`
+数据流；它只能追加继承的来源和污点，不能清除证据。MCP 调用可在
+`_meta.riskproof_flows` 提交相同的边。
 
 代理提供无副作用的 `riskproof/evaluate`，Python Agent 会先评估本批所有工具，
 合并成一次 LangGraph interrupt，得到完整人工决定后才逐个执行。这样可以避免
@@ -272,11 +291,12 @@ Python 包提供：
 
 ## 内建策略范围
 
-17 条内建匹配规则覆盖：
+19 条内建匹配规则覆盖：
 
 - Secret/API Key 通过外部邮件或 HTTP 外发；
 - 客户数据、PII、源码、财务数据和病患数据进入外部 sink；
 - 可疑 Shell 管道、破坏性命令、设备重定向和不可信来源影响；
+- 破坏性/变更型数据库语句，以及不可信内容驱动文件、数据库或浏览器变更；
 - 不可信收件人及 Shell 参数来源；
 - 缺失、过期、不匹配或越权 capability；
 - 收件人和 provenance 白名单；
@@ -285,15 +305,45 @@ Python 包提供：
 `options.defaultDecision="deny"` 会在没有匹配规则时添加兜底拒绝。Shell 检测是
 纵深防御，不是完整 Shell 解析器或沙箱。
 
+## OPA/Rego policy-as-code
+
+RiskProof 可以在内建规则之后执行一个或多个由 Rego 编译的 WASM 模块。OPA
+结果采用单调聚合：只能提高风险或把 `allow` 收紧为 `require_approval`/`deny`，
+不能降低内建决策。返回契约非法或运行异常时默认 fail-closed；开发环境可通过
+API 选择抛出异常。
+
+```bash
+opa build -t wasm -e riskproof/decision examples/policies/production-deploy.rego
+tar -xOf bundle.tar.gz /policy.wasm > policy.wasm
+riskproof check event.json --opa-policy policy.wasm
+```
+
+入口点可返回 `false`、单个 match，或 `{"matches":[...]}`。每个 match 包含
+`id`、`decision`、`riskLevel`（或 `risk`），并可带 `triggeredArgs`、`evidence`
+和 `reason`。程序化集成可使用导出的 `OpaPolicyEngine` 与 `evaluateWithOpa`。
+
+维护者可运行 `npm run test:opa` 验证完整的“Rego 源码 → 编译 WASM → 官方
+JavaScript runtime”链路。该命令需要 OPA CLI（非默认路径可通过
+`RISKPROOF_OPA_BIN` 指定），会重新构建 npm 包、在临时目录编译策略，同时验证
+命中/不命中决策及 proof 内部一致性。CI 和发布工作流固定使用 OPA v1.18.2，并
+校验官方 Linux 二进制的 SHA-256。
+
 ## Proof 存储
 
 每次评估在 `YYYY-MM` 目录写入脱敏 JSON。写入过程使用已经完整写好的临时文件
 和原子、不覆盖的提交方式；POSIX 文件系统上，目录强制为 `0700`，文件强制为
 `0600`。
 
-当前文件存储尚不提供静态加密、自动保留、不可篡改签名、远程复制或容量配额。
-生产运维需要提供加密卷、容量报警、轮转/保留、备份和访问控制。proof 目录不可
-写时，`/ready` 会失败。
+`ProofStore` 可用 AES-256-GCM 加密新记录，并用 HMAC-SHA-256 提供防篡改签名。
+密钥必须恰好 32 字节，并显式使用 `hex:` 或 `base64:` 编码；生产环境应从 secret
+文件或密钥管理系统注入，不能放在命令行。读取 keyring 支持加密/签名密钥轮换；
+严格模式可拒绝旧版明文、未加密或未签名记录。默认非严格模式仍能读取 v0.1 明文
+JSON，便于迁移。
+
+保留策略支持 `maxAgeDays`、`maxRecords`、显式 `store.prune()` 和保存后自动
+执行。损坏或无法解密的文件只报告诊断，绝不会自动删除，以保留事件响应证据。
+本地加密/签名仍不能替代外部 KMS、远程复制、备份、容量监控和操作系统访问控制。
+proof 目录不可写时，`/ready` 会失败。
 
 ## Docker
 
@@ -324,7 +374,7 @@ docker compose up -d
 packages/riskproof/       TypeScript 引擎、CLI、HTTP/MCP 适配器和测试
 agent/                    Python SDK、demo、锁文件和测试
 test-workspace/           28 个策略场景和 mock MCP 集成服务
-scripts/                  版本门禁和可复现 benchmark
+scripts/                  版本门禁、benchmark、OPA 与 Docker 发布 smoke
 .github/workflows/        CI 和受控发布准备
 docs/                     架构、Docker 和发布文档
 PROJECT_AUDIT.md          架构审查和风险登记
@@ -342,8 +392,10 @@ npm run check:versions
 npm run lint
 npm run build
 npm run test:all
+npm run test:opa       # 需要 OPA CLI
 npm run test:coverage -w packages/riskproof
 npm audit --audit-level=high
+npm run test:docker    # 需要已构建的 release-candidate 镜像
 
 # Python
 cd agent
@@ -371,8 +423,9 @@ uv run twine check dist/*
 
 **它能自动推断完整 provenance 吗？**
 
-不能。引擎评估由可信集成提交的 provenance；通用 MCP 适配器无法重建完整 LLM
-上下文来源图。
+MCP Proxy 能自动追踪服务端内容并进行确定性的精确子串反查；它不会猜测不可见的
+LLM 推理或有损改写。摘要/改写应声明单调 `flows`，直接 JS/HTTP 调用仍可显式
+提交 provenance。
 
 **`block` 是否意味着 Shell 已经安全？**
 
@@ -383,15 +436,17 @@ uv run twine check dist/*
 
 在消费 Node 项目安装可选 peer `yaml`，或者改用 JSON。
 
-**为什么本地结果没有 Docker 构建通过？**
+**如何验证容器发布候选？**
 
-Compose 可以在没有 daemon 时做静态校验，但镜像构建和容器冒烟必须有正在运行
-的 Docker daemon。
+按 `docs/docker.md` 构建固定基础镜像 digest 的候选镜像，再运行
+`npm run test:docker`。它会验证非 root/只读根文件系统、HTTP 边界、加密签名
+proof、卷持久化和优雅停机。本地通过是发布证据，但不能替代目标 Linux runner
+和生产卷演练。
 
 ## 发布状态
 
-完成四份上线报告中的检查后，源码可以提交人工验收。在发布负责人建立首个 Git
-提交和远端、启用受保护 CI 与私密漏洞报告、确认 registry 命名空间、配置 OIDC
-trusted publisher，并完成 Docker 实构冒烟前，不得对外宣称已经正式发布。
+完成四份上线报告中的检查后，源码可以提交人工验收。在发布负责人审查并提交本轮
+改动、运行受保护远端 CI、启用私密漏洞报告、确认 registry 命名空间、配置 OIDC
+trusted publisher，并完成目标环境部署演练前，不得对外宣称已经正式发布。
 
 许可证：Apache-2.0，见 `LICENSE`。

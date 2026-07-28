@@ -10,13 +10,14 @@
 // ============================================================================
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { evaluate } from "./engine.js";
+import { evaluateWithOpa, OpaPolicyEngine } from "./opa-policy.js";
 import { loadConfig } from "./config.js";
 import type { RiskProofConfig } from "./config.js";
 import { McpProxyServer } from "./proxy-server.js";
 import { startHttpServer } from "./http-server.js";
-import { ProofStore } from "./proof-store.js";
+import { ProofStore, type ProofStoreOptions } from "./proof-store.js";
 import { ALL_FIXTURES } from "./fixtures.js";
 import { parseEngineInput } from "./validation.js";
 import type { EngineInput, ToolName, TaintLabel, Capability } from "./types.js";
@@ -26,14 +27,15 @@ import type { Fixture } from "./fixtures.js";
 
 function help(exitCode = 0): void {
   console.log(`Usage:
-  riskproof check <event-json-file> [--pretty] [--config|-c <path>]
-  riskproof proxy --upstream <command...> [--proof-dir <path>] [--no-interactive] [--allow-client-decisions] [--config|-c <path>]
-  riskproof serve [--port <n>] [--host <host>] [--proof-dir <path>] [--cors-origin <origin>] [--trust-request-context] [--config|-c <path>]
-  riskproof demo [--proof-dir <path>] [--config|-c <path>]
+  riskproof check <event-json-file> [--pretty] [--config|-c <path>] [--opa-policy <policy.wasm>]
+  riskproof proxy --upstream <command...> [--proof-dir <path>] [--no-interactive] [--allow-client-decisions] [--config|-c <path>] [--opa-policy <policy.wasm>]
+  riskproof serve [--port <n>] [--host <host>] [--proof-dir <path>] [--cors-origin <origin>] [--trust-request-context] [--config|-c <path>] [--opa-policy <policy.wasm>]
+  riskproof demo [--proof-dir <path>] [--config|-c <path>] [--opa-policy <policy.wasm>]
   riskproof validate-config <config-file>
 
 Global options:
   --config, -c   Path to RiskProof config file (.json or .yaml)
+  --opa-policy   Compiled Rego WASM bundle; repeat to load multiple modules
 
 Options (check):
   --pretty        Pretty-print JSON output
@@ -55,8 +57,12 @@ Options (serve):
 Options (demo):
   --proof-dir     Output directory for proofs and report (default: customer-proofs)
 
-Environment: RISKPROOF_CONFIG, RISKPROOF_PROOF_DIR, RISKPROOF_PORT,
-             RISKPROOF_HOST, RISKPROOF_CORS_ORIGIN
+Environment: RISKPROOF_CONFIG, RISKPROOF_OPA_POLICY, RISKPROOF_PROOF_DIR,
+             RISKPROOF_PROOF_ENCRYPTION_KEY(_FILE),
+             RISKPROOF_PROOF_SIGNING_KEY(_FILE),
+             RISKPROOF_PROOF_REQUIRE_ENCRYPTION, RISKPROOF_PROOF_REQUIRE_SIGNATURE,
+             RISKPROOF_RETENTION_MAX_DAYS, RISKPROOF_RETENTION_MAX_RECORDS,
+             RISKPROOF_PORT, RISKPROOF_HOST, RISKPROOF_CORS_ORIGIN
 
 Exit codes: 0=allow, 2=ask_approval, 3=block, 1=error`);
   process.exit(exitCode);
@@ -72,8 +78,11 @@ async function main(argv: string[]): Promise<void> {
   const cmd = args[0];
   const rest = args.slice(1);
 
-  // Extract global --config/-c flag before command-specific parsing
+  // Extract global config/policy flags before command-specific parsing.
   let configPath: string | undefined = process.env.RISKPROOF_CONFIG || undefined;
+  const opaPaths: string[] = process.env.RISKPROOF_OPA_POLICY
+    ? process.env.RISKPROOF_OPA_POLICY.split(process.platform === "win32" ? ";" : ":").filter(Boolean)
+    : [];
   const filtered: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === "--") {
@@ -83,10 +92,22 @@ async function main(argv: string[]): Promise<void> {
     if (rest[i] === "--config" || rest[i] === "-c") {
       if (i + 1 >= rest.length) throw new Error(`${rest[i]} requires a file path`);
       configPath = rest[++i];
+    } else if (rest[i] === "--opa-policy") {
+      if (i + 1 >= rest.length) throw new Error("--opa-policy requires a .wasm file path");
+      opaPaths.push(rest[++i]);
     } else {
       filtered.push(rest[i]);
     }
   }
+
+  const opaPolicies = cmd === "validate-config" ? [] : await Promise.all(opaPaths.map((path, index) => {
+    const stem = basename(path).replace(/\.wasm$/i, "").replace(/[^A-Za-z0-9_-]/g, "_");
+    const id = `policy_${index + 1}_${stem || "rego"}`.slice(0, 128);
+    return OpaPolicyEngine.loadFile(path, { id });
+  }));
+  const proofStoreOptions = ["proxy", "serve", "demo"].includes(cmd)
+    ? proofStoreOptionsFromEnvironment()
+    : {};
 
   // Load config once
   let config: RiskProofConfig | undefined;
@@ -101,10 +122,10 @@ async function main(argv: string[]): Promise<void> {
 
   try {
     switch (cmd) {
-      case "check": runCheck(filtered, config); return;
-      case "proxy": await runProxy(filtered, config); return;
-      case "serve": runServe(filtered, config); return;
-      case "demo": runDemo(filtered, config); return;
+      case "check": runCheck(filtered, config, opaPolicies); return;
+      case "proxy": await runProxy(filtered, config, opaPolicies, proofStoreOptions); return;
+      case "serve": runServe(filtered, config, opaPolicies, proofStoreOptions); return;
+      case "demo": runDemo(filtered, config, opaPolicies, proofStoreOptions); return;
       case "validate-config": runValidateConfig(filtered); return;
       default:
         console.error(`Unknown command: ${cmd}`);
@@ -122,9 +143,15 @@ async function main(argv: string[]): Promise<void> {
 const CC_TOOL_MAP: Record<string, string> = {
   Bash: "shell_exec",
   WebFetch: "http_request", WebSearch: "http_request",
+  Read: "file_read", Glob: "file_read", Grep: "file_read",
+  Write: "file_write", Edit: "file_write", MultiEdit: "file_write",
 };
 
-function runCheck(args: string[], config?: RiskProofConfig): void {
+function runCheck(
+  args: string[],
+  config?: RiskProofConfig,
+  opaPolicies: readonly OpaPolicyEngine[] = [],
+): void {
   let pretty = false;
   const positional: string[] = [];
 
@@ -150,7 +177,7 @@ function runCheck(args: string[], config?: RiskProofConfig): void {
     if (!mapped) {
       throw new Error(
         `Unsupported Claude Code tool '${raw.tool_name}'. ` +
-        `RiskProof currently supports Bash, WebFetch, and WebSearch checks.`,
+        `RiskProof supports shell, web, file read, and file write checks.`,
       );
     }
     input = parseEngineInput({
@@ -169,7 +196,9 @@ function runCheck(args: string[], config?: RiskProofConfig): void {
     throw new Error("Invalid event: expected {tool_name, tool_input} or {tool, args}");
   }
 
-  const result = evaluate(input, config);
+  const result = opaPolicies.length > 0
+    ? evaluateWithOpa(input, opaPolicies, config)
+    : evaluate(input, config);
   const proof = result.proof;
 
   const output = {
@@ -192,7 +221,12 @@ function runCheck(args: string[], config?: RiskProofConfig): void {
 
 // ─── proxy ─────────────────────────────────────────────────────────────────────
 
-async function runProxy(args: string[], config?: RiskProofConfig): Promise<void> {
+async function runProxy(
+  args: string[],
+  config?: RiskProofConfig,
+  opaPolicies: readonly OpaPolicyEngine[] = [],
+  proofStoreOptions: Omit<ProofStoreOptions, "baseDir"> = {},
+): Promise<void> {
   const upstream: string[] = [];
   let proofDir: string | undefined = process.env.RISKPROOF_PROOF_DIR || undefined;
   let interactive = true;
@@ -230,6 +264,8 @@ async function runProxy(args: string[], config?: RiskProofConfig): Promise<void>
     interactive,
     config,
     allowClientDecisions,
+    opaPolicies,
+    proofStoreOptions,
   });
   const shutdown = () => server.stop();
   process.once("SIGINT", shutdown);
@@ -247,7 +283,12 @@ async function runProxy(args: string[], config?: RiskProofConfig): Promise<void>
 
 // ─── serve ─────────────────────────────────────────────────────────────────────
 
-function runServe(args: string[], config?: RiskProofConfig): void {
+function runServe(
+  args: string[],
+  config?: RiskProofConfig,
+  opaPolicies: readonly OpaPolicyEngine[] = [],
+  proofStoreOptions: Omit<ProofStoreOptions, "baseDir"> = {},
+): void {
   let port = readPort(process.env.RISKPROOF_PORT, 9090, "RISKPROOF_PORT");
   let host = process.env.RISKPROOF_HOST || "127.0.0.1";
   let proofDir: string | undefined = process.env.RISKPROOF_PROOF_DIR || undefined;
@@ -277,6 +318,8 @@ function runServe(args: string[], config?: RiskProofConfig): void {
     corsOrigin,
     config,
     trustRequestContext,
+    opaPolicies,
+    proofStoreOptions,
   });
 
   // Graceful shutdown
@@ -292,7 +335,12 @@ function runServe(args: string[], config?: RiskProofConfig): void {
 
 // ─── demo ──────────────────────────────────────────────────────────────────────
 
-function runDemo(args: string[], config?: RiskProofConfig): void {
+function runDemo(
+  args: string[],
+  config?: RiskProofConfig,
+  opaPolicies: readonly OpaPolicyEngine[] = [],
+  proofStoreOptions: Omit<ProofStoreOptions, "baseDir"> = {},
+): void {
   let proofDir = process.env.RISKPROOF_PROOF_DIR || "customer-proofs";
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--proof-dir" && i + 1 < args.length) {
@@ -302,7 +350,7 @@ function runDemo(args: string[], config?: RiskProofConfig): void {
     }
   }
 
-  const store = new ProofStore(resolve(proofDir));
+  const store = new ProofStore({ ...proofStoreOptions, baseDir: resolve(proofDir) });
   console.log(`\n  RiskProof Demo — ${ALL_FIXTURES.length} fixtures\n`);
   console.log("  " + "─".repeat(70));
 
@@ -319,7 +367,7 @@ function runDemo(args: string[], config?: RiskProofConfig): void {
     const taints: Record<string, TaintLabel[]> = {};
     const provenance: Record<string, string[]> = {};
     for (const key of Object.keys(f.call.arguments)) {
-      provenance[key] = [isPoisoned ? "mcp_schema" : "mcp_tool"];
+      provenance[key] = [isPoisoned ? "mcp_schema" : "agent_generated"];
       if (isPoisoned) taints[key] = ["UNTRUSTED_TOOL_SCHEMA"];
     }
     // Merge fixture-provided provenance (don't overwrite, append)
@@ -361,7 +409,9 @@ function runDemo(args: string[], config?: RiskProofConfig): void {
       if (mapped) input.tool = mapped;
     }
 
-    const result = evaluate(input, config);
+    const result = opaPolicies.length > 0
+      ? evaluateWithOpa(input, opaPolicies, config)
+      : evaluate(input, config);
     const ok = result.action === f.expectedAction;
     const rulesOk = f.expectedRules.every((r) => result.matchedPolicies.some((p) => p.id === r));
     const passed = ok && rulesOk;
@@ -414,7 +464,11 @@ function runValidateConfig(args: string[]): void {
 
 function mapToolForDemo(toolName: string, capTool?: string): ToolName | undefined {
   if (capTool) return capTool as ToolName;
-  const lower = toolName.toLowerCase();
+  const lower = toolName.toLowerCase().replace(/[_-]+/g, " ");
+  if (/\b(sql|database|db|query|postgres|mysql|sqlite)\b/.test(lower)) return "database_query";
+  if (/\b(browser|navigate|click|playwright|selenium)\b/.test(lower)) return "browser_action";
+  if (/\b(write file|save file|edit file|replace file|create file)\b/.test(lower)) return "file_write";
+  if (/\b(read file|open file|list files|glob files)\b/.test(lower)) return "file_read";
   if (/(\bshell\b|\bbash\b|\bexec\b|command|deploy|config|apply|run|script|restart|patch|commit|push|pipeline|generate|build|compile|install|update|list|parse|clean|rotate|setup|fix|process|execute|network)/.test(lower)) return "shell_exec";
   if (/(\bhttp\b|fetch|request|\bweb\b|\bapi\b|\burl\b|export|report|upload|download|gateway|proxy|\bsync\b|\btag\b)/.test(lower)) return "http_request";
   if (/(\bemail\b|\bmail\b|send|notify|notification|\balert\b|message|publish|post|campaign)/.test(lower)) return "send_email";
@@ -433,6 +487,52 @@ function readPort(value: string | undefined, fallback: number, source: string): 
     throw new Error(`Invalid ${source}: ${value}`);
   }
   return port;
+}
+
+function proofStoreOptionsFromEnvironment(): Omit<ProofStoreOptions, "baseDir"> {
+  const encryptionKey = readSecretSetting(
+    "RISKPROOF_PROOF_ENCRYPTION_KEY",
+    "RISKPROOF_PROOF_ENCRYPTION_KEY_FILE",
+  );
+  const signingKey = readSecretSetting(
+    "RISKPROOF_PROOF_SIGNING_KEY",
+    "RISKPROOF_PROOF_SIGNING_KEY_FILE",
+  );
+  const maxAgeDays = readOptionalInteger(process.env.RISKPROOF_RETENTION_MAX_DAYS, "RISKPROOF_RETENTION_MAX_DAYS");
+  const maxRecords = readOptionalInteger(process.env.RISKPROOF_RETENTION_MAX_RECORDS, "RISKPROOF_RETENTION_MAX_RECORDS");
+  const retention = maxAgeDays === undefined && maxRecords === undefined
+    ? undefined
+    : { maxAgeDays, maxRecords };
+  return {
+    ...(encryptionKey === undefined ? {} : { encryptionKey }),
+    ...(signingKey === undefined ? {} : { signingKey }),
+    requireEncryption: readBooleanEnvironment("RISKPROOF_PROOF_REQUIRE_ENCRYPTION"),
+    requireSignature: readBooleanEnvironment("RISKPROOF_PROOF_REQUIRE_SIGNATURE"),
+    ...(retention === undefined ? {} : { retention, pruneOnSave: true }),
+  };
+}
+
+function readSecretSetting(valueName: string, fileName: string): string | undefined {
+  const direct = process.env[valueName];
+  const file = process.env[fileName];
+  if (direct && file) throw new Error(`${valueName} and ${fileName} are mutually exclusive`);
+  if (file) return readFileSync(resolve(file), "utf-8").trim();
+  return direct || undefined;
+}
+
+function readBooleanEnvironment(name: string): boolean {
+  const value = process.env[name];
+  if (value === undefined || value === "" || value === "0" || value.toLowerCase() === "false") return false;
+  if (value === "1" || value.toLowerCase() === "true") return true;
+  throw new Error(`${name} must be true, false, 1, or 0`);
+}
+
+function readOptionalInteger(value: string | undefined, name: string): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a positive integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }
 
 function generateSummary(fixtures: Fixture[], pass: number, fail: number): string {
@@ -466,4 +566,7 @@ ${fixtures.map((f) => {
 
 // ─── Run ───────────────────────────────────────────────────────────────────────
 
-main(process.argv);
+void main(process.argv).catch((error: unknown) => {
+  console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  process.exitCode = 1;
+});

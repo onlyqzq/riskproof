@@ -30,10 +30,11 @@ authentication service, data-loss-prevention appliance, or proof that an Agent
 is benign. Every real high-risk tool must be routed through the interceptor;
 otherwise RiskProof cannot protect it.
 
-The supported engine tools in `0.1.x` are `send_email`, `http_request`, and
-`shell_exec`. Unknown external input is rejected by the JSON-facing validation
-boundaries. The MCP adapter maps upstream business tool names conservatively and
-requires approval when no trusted capability exists.
+The supported engine tools in `0.1.x` are `send_email`, `http_request`,
+`shell_exec`, `file_read`, `file_write`, `database_query`, and
+`browser_action`. Unknown external input is rejected by the JSON-facing
+validation boundaries. The MCP adapter maps upstream business tool names
+conservatively and requires approval when no trusted capability exists.
 
 ## Approval trust boundary
 
@@ -73,22 +74,26 @@ and patient data are redacted in HTTP responses, approval cards, compact error
 messages, and stored proofs. Proof directories and files are created with
 `0700` and `0600` permissions where the filesystem supports POSIX modes.
 
-Proof storage is still local JSON storage. It does not provide encryption at
-rest, retention enforcement, remote replication, tamper-evident signatures, or
-cross-host authorization. Operators must supply volume encryption, retention,
-backup, access control, and disk-capacity monitoring appropriate to their data.
+Proof storage is local. New records can be protected with AES-256-GCM and an
+HMAC-SHA-256 tamper-evident envelope. Strict read modes, old-key read keyrings,
+age/count retention, and automatic pruning are available. Keys must come from a
+secret file or key-management boundary; losing a key makes protected evidence
+unreadable. HMAC proves possession of a shared secret, not public non-repudiation.
+Operators must still supply remote replication, backups, OS access control,
+capacity monitoring, and lifecycle management appropriate to their data.
 
 ## Known limitations
 
-- Provenance supplied to the engine is only as trustworthy as the integration
-  that constructs it. The current generic MCP proxy cannot reconstruct a full
-  LLM context provenance graph; ordinary upstream arguments are labeled
-  `mcp_tool`, while poisoned schemas are labeled separately.
+- The MCP proxy automatically indexes bounded resource, prompt, and tool-result
+  content and reverse-maps exact argument substrings. It cannot see opaque LLM
+  reasoning or infer lossy paraphrases. Integrations must declare additive
+  `flows` for transformations, and explicitly supplied provenance is only as
+  trustworthy as the integration that constructs it.
 - Dangerous-shell detection is deterministic defense-in-depth, not complete
   shell parsing or isolation. Execute approved shell work in a separate sandbox
   with least privilege.
 - The HTTP body limit and timeouts reduce abuse impact but do not replace an
-  authenticated gateway, request-rate limits, proof quotas, or retention jobs.
-- File proofs are audit records, not cryptographically signed attestations.
-
-See `RELEASE_READINESS.md` for deployment blockers and operational controls.
+  authenticated gateway, request-rate limits, or proof quotas. Built-in
+  retention bounds local valid records but is not a storage-capacity guarantee.
+- HMAC-protected file proofs are audit records, not publicly verifiable signed
+  attestations. A compromised host or shared signing key can forge them.

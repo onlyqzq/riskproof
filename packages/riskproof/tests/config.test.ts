@@ -29,6 +29,13 @@ describe("configuration validation", () => {
     });
   });
 
+  it("validates and preserves the explainer locale", () => {
+    expect(validateConfig({ version: "1", options: { locale: "en" } }).options)
+      .toEqual({ defaultDecision: "allow", locale: "en" });
+    expect(() => validateConfig({ version: "1", options: { locale: "fr" } }))
+      .toThrow(/options\.locale/);
+  });
+
   it.each(["0", "2", "latest"])("rejects unsupported schema version %s", (version) => {
     expect(() => validateConfig({ version })).toThrow(/Unsupported config version/);
   });
@@ -73,7 +80,7 @@ describe("configuration validation", () => {
       rules: [{
         id: "custom_rule",
         description: "test",
-        tool: "file_write",
+        tool: "file_delete",
         decision: "deny",
         risk: "critical",
         consequence: "test",

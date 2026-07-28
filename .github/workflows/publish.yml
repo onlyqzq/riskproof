@@ -44,6 +44,21 @@ jobs:
           npm run verify
           npm audit --audit-level=high
 
+      - name: Install verified OPA CLI
+        env:
+          OPA_VERSION: "1.18.2"
+          OPA_SHA256: "9903e5125ac281104f2c4b7371d10cc3b74a98933743fcbfc174f9bf0ab20de8"
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors \
+            --output /tmp/opa \
+            "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_amd64_static"
+          echo "${OPA_SHA256}  /tmp/opa" | sha256sum --check
+          chmod 0755 /tmp/opa
+      - name: Compile Rego and execute the real OPA WASM policy
+        env:
+          RISKPROOF_OPA_BIN: /tmp/opa
+        run: npm run test:opa
+
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -101,6 +116,11 @@ jobs:
             --build-arg VCS_REF="$GITHUB_SHA" \
             --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -t riskproof:release-check .
+
+      - name: Run hardened container release smoke
+        env:
+          RISKPROOF_DOCKER_IMAGE: riskproof:release-check
+        run: npm run test:docker
 
       - name: Create release checksums
         shell: bash

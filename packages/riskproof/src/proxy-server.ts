@@ -10,11 +10,14 @@ import { closeSync, createReadStream, openSync } from "node:fs";
 import { createInterface, type Interface } from "node:readline";
 import type { Readable } from "node:stream";
 import { evaluate } from "./engine.js";
-import { ProofStore } from "./proof-store.js";
+import { ProofStore, type ProofStoreOptions } from "./proof-store.js";
 import { formatCard, formatCompact, sanitizeTerminal } from "./explainer.js";
 import { redactEngineOutput, redactLogText } from "./redaction.js";
+import { ContextTracker, ProvenanceMapper, type ContextEntry, type ContextTrackerOptions } from "./provenance.js";
+import { parseEngineInput } from "./validation.js";
+import { evaluateWithOpa, type OpaPolicyEngine } from "./opa-policy.js";
 import type { RiskProofConfig } from "./config.js";
-import type { EngineInput, EngineOutput, TaintLabel, SafetyInvariant, Capability, UserAction } from "./types.js";
+import type { EngineInput, EngineOutput, ProvenanceFlow, TaintLabel, SafetyInvariant, Capability, UserAction } from "./types.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,6 +30,12 @@ export interface ProxyOptions {
   config?: RiskProofConfig;
   /** Trust unsigned approval metadata supplied by the MCP client. Disabled by default. */
   allowClientDecisions?: boolean;
+  /** Bounds for the in-memory MCP response provenance index. */
+  contextTracker?: ContextTrackerOptions;
+  /** Precompiled Rego/OPA WASM modules, aggregated after built-in policies. */
+  opaPolicies?: readonly OpaPolicyEngine[];
+  /** Encryption, signing, and retention settings for audit proofs. */
+  proofStoreOptions?: Omit<ProofStoreOptions, "baseDir">;
 }
 
 interface JsonRpcRequest {
@@ -70,6 +79,10 @@ const SENSITIVE_PARENT_ENV = [
   "ANTHROPIC_API_KEY",
   "AZURE_OPENAI_API_KEY",
   "GOOGLE_API_KEY",
+  "RISKPROOF_PROOF_ENCRYPTION_KEY",
+  "RISKPROOF_PROOF_ENCRYPTION_KEY_FILE",
+  "RISKPROOF_PROOF_SIGNING_KEY",
+  "RISKPROOF_PROOF_SIGNING_KEY_FILE",
 ];
 const FORWARDABLE_CLIENT_NOTIFICATIONS = new Set([
   "notifications/initialized",
@@ -189,7 +202,11 @@ class LimitedLineReader {
 // ─── Tool name mapping (MCP → RiskProof) ──────────────────────────────────────
 
 function mapToolName(name: string): string {
-  const lower = name.toLowerCase();
+  const lower = name.toLowerCase().replace(/[_-]+/g, " ");
+  if (/\b(sql|database|db|query|postgres|mysql|sqlite)\b/.test(lower)) return "database_query";
+  if (/\b(browser|navigate|click|page action|playwright|selenium)\b/.test(lower)) return "browser_action";
+  if (/\b(write file|save file|edit file|replace file|create file)\b/.test(lower)) return "file_write";
+  if (/\b(read file|open file|list files|glob files)\b/.test(lower)) return "file_read";
   if (/(\bshell\b|\bbash\b|\bexec\b|command|deploy|config|apply|run|script|terminal|restart|patch|commit|push|pipeline|generate|build|compile|install|update)/.test(lower)) return "shell_exec";
   if (/(\bhttp\b|fetch|request|\bweb\b|\bapi\b|\burl\b|export|report|upload|download|gateway|proxy|\bsync\b|\btag\b|dashboard|marketing|crm)/.test(lower)) return "http_request";
   if (/(\bemail\b|\bmail\b|send|notify|notification|\balert\b|message|publish|post)/.test(lower)) return "send_email";
@@ -222,6 +239,9 @@ export class McpProxyServer {
   private invariants: SafetyInvariant[];
   private config?: RiskProofConfig;
   private allowClientDecisions: boolean;
+  private readonly contextTracker: ContextTracker;
+  private readonly provenanceMapper: ProvenanceMapper;
+  private readonly opaPolicies: readonly OpaPolicyEngine[];
   private proc: ChildProcess | null = null;
   private toolCache = new Map<string, MCPToolDef>();
   private pending = new Map<number | string, PendingRequest>();
@@ -249,12 +269,15 @@ export class McpProxyServer {
   constructor(opts: ProxyOptions) {
     if (!opts.upstream?.length) throw new Error("--upstream is required");
     this.upstream = opts.upstream;
-    this.proofStore = new ProofStore(opts.proofDir);
+    this.proofStore = new ProofStore({ ...opts.proofStoreOptions, baseDir: opts.proofDir });
     this.interactive = opts.interactive !== false;
     this.env = opts.env ?? {};
     this.invariants = opts.invariants ?? [];
     this.config = opts.config;
     this.allowClientDecisions = opts.allowClientDecisions === true;
+    this.contextTracker = new ContextTracker(opts.contextTracker);
+    this.provenanceMapper = new ProvenanceMapper(this.contextTracker);
+    this.opaPolicies = [...(opts.opaPolicies ?? [])];
     this.exitPromise = new Promise((resolve) => { this.resolveExit = resolve; });
   }
 
@@ -349,6 +372,11 @@ export class McpProxyServer {
     return this.exitPromise;
   }
 
+  /** Metadata-only view for diagnostics; raw indexed context is never exposed. */
+  listContextEntries(): ContextEntry[] {
+    return this.contextTracker.list();
+  }
+
   // ── Message routing ──────────────────────────────────────────────────────────
 
   private async handle(msg: JsonRpcRequest, log: (s: string) => void): Promise<void> {
@@ -372,6 +400,10 @@ export class McpProxyServer {
         case "tools/list": await this.handleToolsList(id, log); break;
         case "tools/call": await this.handleToolsCall(id, params ?? {}, log); break;
         case "riskproof/evaluate": this.handleRiskproofEvaluate(id, params ?? {}, log); break;
+        case "resources/read":
+        case "prompts/get":
+          await this.forwardTracked(id, msg);
+          break;
         default: await this.forward(id, msg);
       }
     } catch (err) {
@@ -425,7 +457,7 @@ export class McpProxyServer {
       this.write(makeError(id, ERR.INVALID_PARAMS, parsed.error));
       return;
     }
-    const { result } = this.evaluateToolCall(parsed.toolName, parsed.args, id);
+    const { result } = this.evaluateToolCall(parsed.toolName, parsed.args, id, parsed.flows);
     log(`riskproof/evaluate: ${sanitizeTerminal(parsed.toolName, 200)} → ${result.action}`);
     this.proofStore.save(result);
     this.write({ jsonrpc: "2.0", id, result: redactEngineOutput(result) });
@@ -437,8 +469,8 @@ export class McpProxyServer {
       this.write(makeError(id, ERR.INVALID_PARAMS, parsed.error));
       return;
     }
-    const { toolName, args } = parsed;
-    const { cached, result } = this.evaluateToolCall(toolName, args, id);
+    const { toolName, args, flows } = parsed;
+    const { cached, result } = this.evaluateToolCall(toolName, args, id, flows);
     const safeToolName = sanitizeTerminal(toolName, 200);
     log(`tools/call: ${safeToolName} → ${result.action} [${result.matchedPolicies.map((p) => p.id).join(", ") || "no rules"}]`);
 
@@ -448,14 +480,14 @@ export class McpProxyServer {
         this.proofStore.save(result);
         process.stderr.write(`  [PASS] ${safeToolName}\n`);
         const req: JsonRpcRequest = { jsonrpc: "2.0", id, method: "tools/call", params: { name: toolName, arguments: args } };
-        try { this.write(await this.forwardRequest(req)); }
+        try { this.write(await this.forwardTrackedRequest(req)); }
         catch (err) { this.write(makeError(id, ERR.INTERNAL, String(err))); }
         break;
       }
 
       case "block": {
         this.proofStore.save(result);
-        const card = formatCard(result, { toolName, toolDesc: cached?.description });
+        const card = formatCard(result, { toolName, toolDesc: cached?.description, locale: this.config?.options?.locale });
         process.stderr.write("\n" + card + "\n");
         this.write(makeError(id, ERR.BLOCKED, formatCompact(result, { toolName })));
         break;
@@ -470,7 +502,7 @@ export class McpProxyServer {
           this.proofStore.save(result, "approve");
           process.stderr.write(`  [APPROVED] User pre-approved via agent — forwarding\n\n`);
           const req: JsonRpcRequest = { jsonrpc: "2.0", id, method: "tools/call", params: { name: toolName, arguments: args } };
-          try { this.write(await this.forwardRequest(req)); }
+          try { this.write(await this.forwardTrackedRequest(req)); }
           catch (err) { this.write(makeError(id, ERR.INTERNAL, String(err))); }
           return;
         }
@@ -483,14 +515,14 @@ export class McpProxyServer {
         }
 
         if (!this.interactive) {
-          const card = formatCompact(result, { toolName });
+          const card = formatCompact(result, { toolName, locale: this.config?.options?.locale });
           process.stderr.write("\n" + card + "\n  [REVIEW] Non-interactive — auto-denied.\n\n");
           this.proofStore.save(result, "reject", "Auto-denied in non-interactive mode");
           this.write(makeError(id, ERR.REQUIRES_APPROVAL, card));
           return;
         }
 
-        const card = formatCard(result, { toolName, toolDesc: cached?.description });
+        const card = formatCard(result, { toolName, toolDesc: cached?.description, locale: this.config?.options?.locale });
         process.stderr.write("\n" + card + "\n");
         const decision = await this.promptUser();
 
@@ -498,7 +530,7 @@ export class McpProxyServer {
           this.proofStore.save(result, "approve");
           process.stderr.write("  [APPROVED] Forwarding...\n\n");
           const req: JsonRpcRequest = { jsonrpc: "2.0", id, method: "tools/call", params: { name: toolName, arguments: args } };
-          try { this.write(await this.forwardRequest(req)); }
+          try { this.write(await this.forwardTrackedRequest(req)); }
           catch (err) { this.write(makeError(id, ERR.INTERNAL, String(err))); }
         } else {
           this.proofStore.save(result, "reject");
@@ -514,6 +546,7 @@ export class McpProxyServer {
     toolName: string,
     args: Record<string, unknown>,
     requestId: number | string,
+    flows?: ProvenanceFlow[],
   ): { cached?: MCPToolDef; result: EngineOutput } {
     const cached = this.toolCache.get(toolName);
     const isPoisoned = this.poisonedTools.has(toolName);
@@ -524,16 +557,28 @@ export class McpProxyServer {
     // poisoned tool cannot evade the forbidden-taint rule and default-allow.
     let schemaEvidenceArg = SCHEMA_POISONING_EVIDENCE_ARG;
     while (Object.hasOwn(args, schemaEvidenceArg)) schemaEvidenceArg = `_${schemaEvidenceArg}`;
+    // Snapshot client arguments before the provenance mapper inspects them. This
+    // preserves the public boundary's Proxy/getter/TOCTOU protections.
+    const snapshot = parseEngineInput({
+      tool: mappedTool,
+      args,
+      ...(flows?.length ? { flows } : {}),
+    });
     const evaluationArgs: Record<string, unknown> = isPoisoned
-      ? { ...args, [schemaEvidenceArg]: toolName }
-      : args;
+      ? { ...snapshot.args, [schemaEvidenceArg]: toolName }
+      : snapshot.args;
 
     // Build EngineInput
-    const taints: Record<string, TaintLabel[]> = {};
-    const provenance: Record<string, string[]> = {};
+    const mapped = this.provenanceMapper.mapArguments(snapshot.args);
+    const taints: Record<string, TaintLabel[]> = { ...mapped.taints };
+    const provenance: Record<string, string[]> = { ...mapped.provenance };
     for (const key of Object.keys(evaluationArgs)) {
-      provenance[key] = [isPoisoned ? "mcp_schema" : "mcp_tool"];
-      if (isPoisoned) taints[key] = ["UNTRUSTED_TOOL_SCHEMA"];
+      if (!provenance[key]) provenance[key] = [];
+      if (!taints[key]) taints[key] = [];
+      if (isPoisoned) {
+        provenance[key] = [...new Set([...provenance[key], "mcp_schema"])];
+        taints[key] = [...new Set<TaintLabel>([...taints[key], "UNTRUSTED_TOOL_SCHEMA"])];
+      }
     }
 
     const input: EngineInput = {
@@ -541,6 +586,7 @@ export class McpProxyServer {
       args: evaluationArgs,
       provenance,
       taints: Object.keys(taints).length > 0 ? taints : undefined,
+      flows: snapshot.flows,
       capability: isPoisoned
         ? { tool: mappedTool as Capability["tool"], forbiddenTaints: ["UNTRUSTED_TOOL_SCHEMA"] }
         : undefined,
@@ -548,7 +594,9 @@ export class McpProxyServer {
       trace: { traceId: `proxy-${Date.now()}`, stepId: String(requestId) },
     };
 
-    const result = evaluate(input, this.config);
+    const result = this.opaPolicies.length > 0
+      ? evaluateWithOpa(input, this.opaPolicies, this.config)
+      : evaluate(input, this.config);
     return { cached, result };
   }
 
@@ -709,6 +757,19 @@ export class McpProxyServer {
     catch (err) { this.write(makeError(id, ERR.INTERNAL, String(err))); }
   }
 
+  private async forwardTracked(id: number | string, req: JsonRpcRequest): Promise<void> {
+    try { this.write(await this.forwardTrackedRequest(req)); }
+    catch (err) { this.write(makeError(id, ERR.INTERNAL, String(err))); }
+  }
+
+  private async forwardTrackedRequest(req: JsonRpcRequest): Promise<JsonRpcResponse> {
+    const response = await this.forwardRequest(req);
+    if (response.error === undefined && response.result !== undefined) {
+      this.contextTracker.recordResponse(req.method, req.params, response.result);
+    }
+    return response;
+  }
+
   private forwardRequest(req: JsonRpcRequest): Promise<JsonRpcResponse> {
     return new Promise((resolve, reject) => {
       const id = req.id!;
@@ -817,7 +878,7 @@ function makeError(id: number | string, code: number, message: string): JsonRpcR
 }
 
 function parseToolCallParams(params: Record<string, unknown>):
-  | { toolName: string; args: Record<string, unknown> }
+  | { toolName: string; args: Record<string, unknown>; flows?: ProvenanceFlow[] }
   | { error: string } {
   const toolName = params.name;
   const rawArgs = params.arguments ?? {};
@@ -827,5 +888,35 @@ function parseToolCallParams(params: Record<string, unknown>):
   if (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs)) {
     return { error: "Invalid param: arguments must be an object" };
   }
-  return { toolName, args: rawArgs as Record<string, unknown> };
+  const flowResult = parseFlowMetadata(params._meta);
+  if ("error" in flowResult) return flowResult;
+  return {
+    toolName,
+    args: rawArgs as Record<string, unknown>,
+    ...(flowResult.flows === undefined ? {} : { flows: flowResult.flows }),
+  };
+}
+
+function parseFlowMetadata(value: unknown): { flows?: ProvenanceFlow[] } | { error: string } {
+  if (value === undefined) return {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const raw = (value as Record<string, unknown>).riskproof_flows;
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw)) return { error: "Invalid _meta.riskproof_flows: expected an array" };
+  const flows: ProvenanceFlow[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const item = raw[index];
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      return { error: `Invalid _meta.riskproof_flows[${index}]: expected an object` };
+    }
+    const flow = item as Record<string, unknown>;
+    if (typeof flow.from !== "string" || typeof flow.to !== "string") {
+      return { error: `Invalid _meta.riskproof_flows[${index}]: from/to must be strings` };
+    }
+    if (flow.via !== undefined && typeof flow.via !== "string") {
+      return { error: `Invalid _meta.riskproof_flows[${index}].via: expected a string` };
+    }
+    flows.push({ from: flow.from, to: flow.to, ...(flow.via === undefined ? {} : { via: flow.via }) });
+  }
+  return { flows };
 }

@@ -16,10 +16,19 @@ import {
   opendirSync,
   readSync,
   readdirSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { basename, resolve } from "node:path";
 import { redactEngineOutput, redactLogText } from "./redaction.js";
 import { parseRfc3339 } from "./timestamp.js";
@@ -52,7 +61,12 @@ export interface ProofFilter {
   limit?: number;
 }
 
-export type CorruptProofKind = "read_error" | "invalid_json" | "invalid_record";
+export type CorruptProofKind =
+  | "read_error"
+  | "invalid_json"
+  | "invalid_record"
+  | "integrity_error"
+  | "decryption_error";
 
 export interface CorruptProofDiagnostic {
   filePath: string;
@@ -71,6 +85,42 @@ export interface ProofListResult {
   mayHaveMoreRecords: boolean;
 }
 
+export type ProofKeyInput = Uint8Array | string;
+
+export interface ProofRetentionPolicy {
+  /** Delete valid proofs older than this many 24-hour days. */
+  maxAgeDays?: number;
+  /** Keep only the newest N valid proofs after age pruning. */
+  maxRecords?: number;
+}
+
+export interface ProofStoreOptions {
+  baseDir?: string;
+  /** Current AES-256-GCM key. Strings must use `hex:` or `base64:` prefix. */
+  encryptionKey?: ProofKeyInput;
+  /** Previous AES keys accepted for reads during key rotation. */
+  decryptionKeys?: ProofKeyInput[];
+  /** Current HMAC-SHA-256 key for tamper-evident envelopes. */
+  signingKey?: ProofKeyInput;
+  /** Previous HMAC keys accepted for reads during key rotation. */
+  verificationKeys?: ProofKeyInput[];
+  /** Reject legacy/plain or signed-only files when reading. */
+  requireEncryption?: boolean;
+  /** Reject unsigned files when reading. */
+  requireSignature?: boolean;
+  retention?: ProofRetentionPolicy;
+  /** Apply retention after each successful atomic save. */
+  pruneOnSave?: boolean;
+  /** Injectable clock for deterministic retention tests. */
+  clock?: () => Date;
+}
+
+export interface ProofPruneResult {
+  deleted: number;
+  kept: number;
+  corrupt: number;
+}
+
 // ─── ProofStore ────────────────────────────────────────────────────────────────
 
 const DEFAULT_DIR = ".riskproof/proofs";
@@ -81,7 +131,10 @@ export const MAX_USER_NOTE_LENGTH = 4_096;
 export const MAX_PROOF_FILE_BYTES = 4 * 1024 * 1024;
 
 const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/;
-const TOOLS = new Set(["send_email", "http_request", "shell_exec"]);
+const TOOLS = new Set([
+  "send_email", "http_request", "shell_exec", "file_read", "file_write",
+  "database_query", "browser_action",
+]);
 const ACTIONS = new Set(["allow", "ask_approval", "block"]);
 const DECISIONS = new Set(["allow", "require_approval", "deny"]);
 const RISK_LEVELS = new Set(["low", "medium", "high", "critical"]);
@@ -117,11 +170,61 @@ const PROOF_FILTER_FIELDS = new Set([
   "tool", "decision", "action", "riskLevel", "since", "until", "limit",
 ]);
 
+const PROOF_ENVELOPE_FORMAT = "riskproof.proof.v1";
+const AES_ALGORITHM = "aes-256-gcm";
+const HMAC_ALGORITHM = "hmac-sha256";
+const KEY_BYTES = 32;
+const IV_BYTES = 12;
+const AUTH_TAG_BYTES = 16;
+
+interface ProofEnvelopeV1 {
+  format: typeof PROOF_ENVELOPE_FORMAT;
+  payload: string;
+  encryption?: {
+    algorithm: typeof AES_ALGORITHM;
+    keyId: string;
+    iv: string;
+    tag: string;
+  };
+  integrity?: {
+    algorithm: typeof HMAC_ALGORITHM;
+    keyId: string;
+    signature: string;
+  };
+}
+
+interface ProofCryptoState {
+  encryptionKey?: Buffer;
+  signingKey?: Buffer;
+  decryptionKeys: Map<string, Buffer>;
+  verificationKeys: Map<string, Buffer>;
+  requireEncryption: boolean;
+  requireSignature: boolean;
+}
+
 export class ProofStore {
   readonly baseDir: string;
+  private readonly crypto: ProofCryptoState;
+  private readonly retention?: ProofRetentionPolicy;
+  private readonly pruneOnSave: boolean;
+  private readonly clock: () => Date;
 
-  constructor(baseDir?: string) {
-    this.baseDir = baseDir ? resolve(baseDir) : resolve(DEFAULT_DIR);
+  constructor(baseDirOrOptions?: string | ProofStoreOptions) {
+    const options: ProofStoreOptions = typeof baseDirOrOptions === "string"
+      ? { baseDir: baseDirOrOptions }
+      : snapshotProofStoreOptions(baseDirOrOptions);
+    if (options.baseDir !== undefined && typeof options.baseDir !== "string") {
+      throw new TypeError("ProofStore baseDir must be a string");
+    }
+    this.baseDir = options.baseDir ? resolve(options.baseDir) : resolve(DEFAULT_DIR);
+    this.crypto = createCryptoState(options);
+    this.retention = normalizeRetention(options.retention);
+    this.pruneOnSave = options.pruneOnSave === true;
+    this.clock = options.clock ?? (() => new Date());
+    if (typeof this.clock !== "function") throw new TypeError("ProofStore clock must be a function");
+    if (this.pruneOnSave && !this.retention) {
+      throw new TypeError("ProofStore pruneOnSave requires a retention policy");
+    }
   }
 
   checkWritable(): void {
@@ -159,9 +262,11 @@ export class ProofStore {
       userNote: safeUserNote,
       engineOutput: redactEngineOutput(output),
     };
-    const serialized = JSON.stringify(record, null, 2);
+    // Refuse to persist caller-constructed EngineOutput objects whose summary,
+    // policy, evidence, or proof copies are internally inconsistent.
+    const serialized = serializeProofRecord(validateProofRecord(record), this.crypto);
     if (Buffer.byteLength(serialized, "utf-8") > MAX_PROOF_FILE_BYTES) {
-      throw new RangeError(`Serialized proof must not exceed ${MAX_PROOF_FILE_BYTES} bytes`);
+      throw new RangeError(`Serialized proof envelope must not exceed ${MAX_PROOF_FILE_BYTES} bytes`);
     }
 
     mkdirPrivate(this.baseDir);
@@ -178,6 +283,7 @@ export class ProofStore {
       chmodSync(tempPath, 0o600);
       const filePath = commitUnique(tempPath, dir, fileStem);
       unlinkSync(tempPath);
+      if (this.pruneOnSave) this.prune();
       return filePath;
     } catch (err) {
       try { unlinkSync(tempPath); } catch { /* no temporary file to remove */ }
@@ -194,7 +300,7 @@ export class ProofStore {
         const name = basename(fp);
         if (name !== `${fileStem}.json` && !name.startsWith(`${fileStem}_`)) continue;
         try {
-          const record = readProofRecord(fp);
+          const record = readProofRecord(fp, this.crypto);
           if (record.proofId === proofId && monthForTimestamp(parseRfc3339(record.timestamp, "timestamp")) === ym) {
             return record;
           }
@@ -233,7 +339,7 @@ export class ProofStore {
       const ym = months[monthIndex];
       for (const filePath of proofFiles(resolve(this.baseDir, ym))) {
         try {
-          const record = readProofRecord(filePath);
+          const record = readProofRecord(filePath, this.crypto);
           const timestampMs = parseRfc3339(record.timestamp, "timestamp");
           if (monthForTimestamp(timestampMs) !== ym) {
             throw new ProofFileError(
@@ -277,6 +383,50 @@ export class ProofStore {
       corruptDiagnosticsTruncated: corruptCount > corrupt.length,
       mayHaveMoreRecords,
     };
+  }
+
+  /** Apply the configured (or supplied) retention policy to valid proof files. */
+  prune(policy: ProofRetentionPolicy | undefined = this.retention): ProofPruneResult {
+    const normalized = normalizeRetention(policy);
+    if (!normalized) throw new TypeError("A proof retention policy is required");
+    if (!existsSync(this.baseDir)) return { deleted: 0, kept: 0, corrupt: 0 };
+
+    const candidates: Array<{ filePath: string; timestampMs: number }> = [];
+    let corrupt = 0;
+    for (const month of listDirs(this.baseDir).filter((name) => MONTH_PATTERN.test(name))) {
+      for (const filePath of proofFiles(resolve(this.baseDir, month))) {
+        try {
+          const record = readProofRecord(filePath, this.crypto);
+          candidates.push({ filePath, timestampMs: parseRfc3339(record.timestamp, "timestamp") });
+        } catch {
+          // Retention never deletes unreadable records automatically: operators
+          // may need them for incident response and key-recovery diagnostics.
+          corrupt += 1;
+        }
+      }
+    }
+
+    const deletions = new Set<string>();
+    if (normalized.maxAgeDays !== undefined) {
+      const now = this.clock();
+      if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+        throw new TypeError("ProofStore clock must return a valid Date");
+      }
+      const cutoff = now.getTime() - normalized.maxAgeDays * 86_400_000;
+      candidates.filter(({ timestampMs }) => timestampMs < cutoff)
+        .forEach(({ filePath }) => deletions.add(filePath));
+    }
+
+    if (normalized.maxRecords !== undefined) {
+      const remaining = candidates
+        .filter(({ filePath }) => !deletions.has(filePath))
+        .sort((left, right) => right.timestampMs - left.timestampMs || left.filePath.localeCompare(right.filePath));
+      remaining.slice(normalized.maxRecords).forEach(({ filePath }) => deletions.add(filePath));
+    }
+
+    for (const filePath of deletions) unlinkSync(filePath);
+    removeEmptyMonthDirs(this.baseDir);
+    return { deleted: deletions.size, kept: candidates.length - deletions.size, corrupt };
   }
 }
 
@@ -441,7 +591,46 @@ class ProofFileError extends Error {
   }
 }
 
-function readProofRecord(filePath: string): ProofRecord {
+function serializeProofRecord(record: ProofRecord, crypto: ProofCryptoState): string {
+  if (!crypto.encryptionKey && !crypto.signingKey) return JSON.stringify(record, null, 2);
+  const plaintext = Buffer.from(JSON.stringify(record), "utf-8");
+  const envelope: ProofEnvelopeV1 = {
+    format: PROOF_ENVELOPE_FORMAT,
+    payload: "",
+  };
+
+  if (crypto.encryptionKey) {
+    const keyId = proofKeyId(crypto.encryptionKey);
+    const iv = randomBytes(IV_BYTES);
+    const aad = encryptionAad(keyId, iv);
+    const cipher = createCipheriv(AES_ALGORITHM, crypto.encryptionKey, iv, { authTagLength: AUTH_TAG_BYTES });
+    cipher.setAAD(aad);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    envelope.payload = ciphertext.toString("base64");
+    envelope.encryption = {
+      algorithm: AES_ALGORITHM,
+      keyId,
+      iv: iv.toString("base64"),
+      tag: cipher.getAuthTag().toString("base64"),
+    };
+  } else {
+    envelope.payload = plaintext.toString("base64");
+  }
+
+  if (crypto.signingKey) {
+    const keyId = proofKeyId(crypto.signingKey);
+    envelope.integrity = {
+      algorithm: HMAC_ALGORITHM,
+      keyId,
+      signature: createHmac("sha256", crypto.signingKey)
+        .update(envelopeSigningPayload(envelope))
+        .digest("base64"),
+    };
+  }
+  return JSON.stringify(envelope, null, 2);
+}
+
+function readProofRecord(filePath: string, crypto: ProofCryptoState): ProofRecord {
   let serialized: string;
   let descriptor: number | undefined;
   try {
@@ -488,7 +677,134 @@ function readProofRecord(filePath: string): ProofRecord {
   } catch {
     throw new ProofFileError("invalid_json", "Proof file is not valid JSON");
   }
+  if (isProofEnvelope(raw)) return decodeProofEnvelope(raw, crypto);
+  if (crypto.requireEncryption) {
+    throw new ProofFileError("decryption_error", "Proof is not encrypted as required");
+  }
+  if (crypto.requireSignature) {
+    throw new ProofFileError("integrity_error", "Proof is not signed as required");
+  }
   return validateProofRecord(raw);
+}
+
+function decodeProofEnvelope(raw: unknown, crypto: ProofCryptoState): ProofRecord {
+  const envelope = proofObject(raw, "envelope") as unknown as ProofEnvelopeV1;
+  const allowed = new Set(["format", "payload", "encryption", "integrity"]);
+  rejectProofUnknownFields(envelope as unknown as Record<string, unknown>, allowed, "envelope");
+  if (envelope.format !== PROOF_ENVELOPE_FORMAT) {
+    throw new ProofFileError("invalid_record", "Proof envelope format is unsupported");
+  }
+  if (typeof envelope.payload !== "string") {
+    throw new ProofFileError("invalid_record", "Proof envelope payload must be base64 text");
+  }
+
+  if (envelope.integrity) verifyEnvelopeSignature(envelope, crypto);
+  else if (crypto.requireSignature) {
+    throw new ProofFileError("integrity_error", "Proof envelope is unsigned");
+  }
+
+  let plaintext: Buffer;
+  if (envelope.encryption) plaintext = decryptEnvelope(envelope, crypto);
+  else {
+    if (crypto.requireEncryption) {
+      throw new ProofFileError("decryption_error", "Proof envelope is not encrypted");
+    }
+    plaintext = decodeBase64(envelope.payload, "Proof envelope payload", "invalid_record");
+  }
+  if (plaintext.byteLength > MAX_PROOF_FILE_BYTES) {
+    throw new ProofFileError("invalid_record", "Decoded proof exceeds the supported size");
+  }
+
+  let record: unknown;
+  try { record = JSON.parse(plaintext.toString("utf-8")); }
+  catch { throw new ProofFileError("invalid_json", "Decoded proof payload is not valid JSON"); }
+  return validateProofRecord(record);
+}
+
+function verifyEnvelopeSignature(envelope: ProofEnvelopeV1, crypto: ProofCryptoState): void {
+  const integrity = envelope.integrity;
+  if (integrity && typeof integrity === "object") {
+    rejectProofUnknownFields(
+      integrity as unknown as Record<string, unknown>,
+      new Set(["algorithm", "keyId", "signature"]),
+      "envelope.integrity",
+    );
+  }
+  if (!integrity || integrity.algorithm !== HMAC_ALGORITHM || typeof integrity.keyId !== "string" ||
+    typeof integrity.signature !== "string") {
+    throw new ProofFileError("integrity_error", "Proof envelope signature metadata is invalid");
+  }
+  const key = crypto.verificationKeys.get(integrity.keyId);
+  if (!key) throw new ProofFileError("integrity_error", "No verification key is configured for this proof");
+  const actual = decodeBase64(integrity.signature, "Proof signature", "integrity_error");
+  const expected = createHmac("sha256", key).update(envelopeSigningPayload(envelope)).digest();
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new ProofFileError("integrity_error", "Proof signature verification failed");
+  }
+}
+
+function decryptEnvelope(envelope: ProofEnvelopeV1, crypto: ProofCryptoState): Buffer {
+  const encryption = envelope.encryption;
+  if (encryption && typeof encryption === "object") {
+    rejectProofUnknownFields(
+      encryption as unknown as Record<string, unknown>,
+      new Set(["algorithm", "keyId", "iv", "tag"]),
+      "envelope.encryption",
+    );
+  }
+  if (!encryption || encryption.algorithm !== AES_ALGORITHM || typeof encryption.keyId !== "string" ||
+    typeof encryption.iv !== "string" || typeof encryption.tag !== "string") {
+    throw new ProofFileError("decryption_error", "Proof encryption metadata is invalid");
+  }
+  const key = crypto.decryptionKeys.get(encryption.keyId);
+  if (!key) throw new ProofFileError("decryption_error", "No decryption key is configured for this proof");
+  const iv = decodeBase64(encryption.iv, "Proof IV", "decryption_error");
+  const tag = decodeBase64(encryption.tag, "Proof authentication tag", "decryption_error");
+  const ciphertext = decodeBase64(envelope.payload, "Proof ciphertext", "decryption_error");
+  if (iv.length !== IV_BYTES || tag.length !== AUTH_TAG_BYTES) {
+    throw new ProofFileError("decryption_error", "Proof encryption metadata has an invalid length");
+  }
+  try {
+    const decipher = createDecipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_BYTES });
+    decipher.setAAD(encryptionAad(encryption.keyId, iv));
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  } catch {
+    throw new ProofFileError("decryption_error", "Proof decryption or authentication failed");
+  }
+}
+
+function envelopeSigningPayload(envelope: ProofEnvelopeV1): string {
+  return JSON.stringify({
+    format: envelope.format,
+    payload: envelope.payload,
+    ...(envelope.encryption ? { encryption: envelope.encryption } : {}),
+  });
+}
+
+function encryptionAad(keyId: string, iv: Uint8Array): Buffer {
+  return Buffer.from(JSON.stringify({
+    format: PROOF_ENVELOPE_FORMAT,
+    algorithm: AES_ALGORITHM,
+    keyId,
+    iv: Buffer.from(iv).toString("base64"),
+  }), "utf-8");
+}
+
+function isProofEnvelope(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    (value as Record<string, unknown>).format === PROOF_ENVELOPE_FORMAT;
+}
+
+function decodeBase64(
+  value: string,
+  label: string,
+  kind: CorruptProofKind,
+): Buffer {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new ProofFileError(kind, `${label} is not canonical base64`);
+  }
+  return Buffer.from(value, "base64");
 }
 
 function validateProofRecord(raw: unknown): ProofRecord {
@@ -674,6 +990,146 @@ function toDiagnostic(filePath: string, error: unknown): CorruptProofDiagnostic 
     return { filePath, kind: error.kind, reason: error.message };
   }
   return { filePath, kind: "read_error", reason: "Proof file could not be processed" };
+}
+
+/** Decode a documented proof key format and return an isolated 32-byte copy. */
+export function parseProofKey(value: ProofKeyInput, label = "proof key"): Buffer {
+  let key: Buffer;
+  if (typeof value === "string") {
+    if (value.startsWith("hex:")) {
+      const encoded = value.slice(4);
+      if (!/^[a-fA-F0-9]{64}$/.test(encoded)) {
+        throw new TypeError(`${label} hex value must contain exactly 64 hexadecimal characters`);
+      }
+      key = Buffer.from(encoded, "hex");
+    } else if (value.startsWith("base64:")) {
+      const encoded = value.slice(7);
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+        throw new TypeError(`${label} must contain canonical base64`);
+      }
+      key = Buffer.from(encoded, "base64");
+    } else {
+      throw new TypeError(`${label} string must use a 'hex:' or 'base64:' prefix`);
+    }
+  } else if (value instanceof Uint8Array) {
+    key = Buffer.from(value);
+  } else {
+    throw new TypeError(`${label} must be a Uint8Array or encoded string`);
+  }
+  if (key.length !== KEY_BYTES) throw new TypeError(`${label} must decode to exactly ${KEY_BYTES} bytes`);
+  return key;
+}
+
+function createCryptoState(options: ProofStoreOptions): ProofCryptoState {
+  if (options.decryptionKeys !== undefined && !Array.isArray(options.decryptionKeys)) {
+    throw new TypeError("ProofStore decryptionKeys must be an array");
+  }
+  if (options.verificationKeys !== undefined && !Array.isArray(options.verificationKeys)) {
+    throw new TypeError("ProofStore verificationKeys must be an array");
+  }
+  for (const name of ["requireEncryption", "requireSignature", "pruneOnSave"] as const) {
+    if (options[name] !== undefined && typeof options[name] !== "boolean") {
+      throw new TypeError(`ProofStore ${name} must be a boolean`);
+    }
+  }
+  const encryptionKey = options.encryptionKey === undefined
+    ? undefined
+    : parseProofKey(options.encryptionKey, "ProofStore encryptionKey");
+  const signingKey = options.signingKey === undefined
+    ? undefined
+    : parseProofKey(options.signingKey, "ProofStore signingKey");
+  if (options.requireEncryption === true && !encryptionKey) {
+    throw new TypeError("ProofStore requireEncryption needs a current encryptionKey");
+  }
+  if (options.requireSignature === true && !signingKey) {
+    throw new TypeError("ProofStore requireSignature needs a current signingKey");
+  }
+
+  const decryptionKeys = keyMap([
+    ...(encryptionKey ? [encryptionKey] : []),
+    ...(options.decryptionKeys ?? []).map((key, index) =>
+      parseProofKey(key, `ProofStore decryptionKeys[${index}]`)),
+  ]);
+  const verificationKeys = keyMap([
+    ...(signingKey ? [signingKey] : []),
+    ...(options.verificationKeys ?? []).map((key, index) =>
+      parseProofKey(key, `ProofStore verificationKeys[${index}]`)),
+  ]);
+  return {
+    encryptionKey,
+    signingKey,
+    decryptionKeys,
+    verificationKeys,
+    requireEncryption: options.requireEncryption === true,
+    requireSignature: options.requireSignature === true,
+  };
+}
+
+function keyMap(keys: readonly Buffer[]): Map<string, Buffer> {
+  const result = new Map<string, Buffer>();
+  keys.forEach((key) => result.set(proofKeyId(key), Buffer.from(key)));
+  return result;
+}
+
+function proofKeyId(key: Uint8Array): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, 32);
+}
+
+function snapshotProofStoreOptions(value: ProofStoreOptions | undefined): ProofStoreOptions {
+  if (value === undefined) return {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("ProofStore options must be an object");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("ProofStore options must be a plain object");
+  }
+  const allowed = new Set([
+    "baseDir", "encryptionKey", "decryptionKeys", "signingKey", "verificationKeys",
+    "requireEncryption", "requireSignature", "retention", "pruneOnSave", "clock",
+  ]);
+  const result: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) {
+      throw new TypeError("ProofStore options contain unsupported field(s)");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new TypeError(`ProofStore option '${key}' must be an enumerable data property`);
+    }
+    if (descriptor.value !== undefined) result[key] = descriptor.value;
+  }
+  return result as unknown as ProofStoreOptions;
+}
+
+function normalizeRetention(policy: ProofRetentionPolicy | undefined): ProofRetentionPolicy | undefined {
+  if (policy === undefined) return undefined;
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) {
+    throw new TypeError("ProofStore retention must be an object");
+  }
+  const unknown = Object.keys(policy).filter((key) => key !== "maxAgeDays" && key !== "maxRecords");
+  if (unknown.length > 0) throw new TypeError("ProofStore retention contains unsupported field(s)");
+  if (policy.maxAgeDays === undefined && policy.maxRecords === undefined) {
+    throw new TypeError("ProofStore retention must define maxAgeDays or maxRecords");
+  }
+  if (policy.maxAgeDays !== undefined &&
+    (!Number.isSafeInteger(policy.maxAgeDays) || policy.maxAgeDays < 1 || policy.maxAgeDays > 36_500)) {
+    throw new RangeError("ProofStore retention.maxAgeDays must be an integer between 1 and 36500");
+  }
+  if (policy.maxRecords !== undefined &&
+    (!Number.isSafeInteger(policy.maxRecords) || policy.maxRecords < 1 || policy.maxRecords > 10_000_000)) {
+    throw new RangeError("ProofStore retention.maxRecords must be an integer between 1 and 10000000");
+  }
+  return { ...policy };
+}
+
+function removeEmptyMonthDirs(baseDir: string): void {
+  for (const month of listDirs(baseDir).filter((name) => MONTH_PATTERN.test(name))) {
+    const path = resolve(baseDir, month);
+    try {
+      if (readdirSync(path).length === 0) rmdirSync(path);
+    } catch { /* A concurrent writer may have created a file; leave the directory. */ }
+  }
 }
 
 function mkdirPrivate(dir: string): void {

@@ -1,7 +1,8 @@
 # ============================================================================
 # RiskProof — Multi-stage Docker Build
 # ============================================================================
-# Produces a minimal production image with Node.js and the small re2js runtime.
+# Produces a minimal production image with Node.js and the declared runtime
+# dependencies used by the compiled CLI.
 # Runs as non-root.
 #
 # Usage:
@@ -21,7 +22,7 @@
 # ============================================================================
 
 # ── Stage 1: Build TypeScript ──────────────────────────────────────────────
-FROM node:22.20.0-alpine3.22 AS builder
+FROM node:22.20.0-alpine3.22@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af AS builder
 
 WORKDIR /app
 
@@ -51,7 +52,7 @@ RUN test -f /app/packages/riskproof/dist/riskproof.schema.json || \
     (echo "ERROR: dist/riskproof.schema.json not found — asset copy failed" && exit 1)
 
 # ── Stage 2: Minimal production image ──────────────────────────────────────
-FROM node:22.20.0-alpine3.22
+FROM node:22.20.0-alpine3.22@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af
 
 ARG VCS_REF="unknown"
 ARG BUILD_DATE="unknown"
@@ -88,9 +89,16 @@ COPY --from=builder --chown=node:node \
 COPY --from=builder --chown=node:node \
     /app/node_modules/re2js/ ./node_modules/re2js/
 COPY --from=builder --chown=node:node \
+    /app/node_modules/@open-policy-agent/opa-wasm/ ./node_modules/@open-policy-agent/opa-wasm/
+COPY --from=builder --chown=node:node \
+    /app/node_modules/sprintf-js/ ./node_modules/sprintf-js/
+COPY --from=builder --chown=node:node \
     /app/node_modules/yaml/ ./node_modules/yaml/
 
-RUN node --input-type=module -e "await import('re2js'); await import('yaml')"
+# Import every direct runtime dependency during the image build. This catches
+# an incomplete production-stage COPY before a container reaches deployment.
+RUN node --input-type=module -e \
+    "await import('re2js'); await import('yaml'); await import('@open-policy-agent/opa-wasm')"
 
 # Switch to non-root user
 USER node
