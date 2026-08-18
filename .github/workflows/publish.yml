@@ -72,6 +72,8 @@ jobs:
           path: npm-dist
       - name: Publish verified npm tarball
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ""
         run: |
           set -euo pipefail
           ls -la npm-dist
