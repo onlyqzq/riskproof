@@ -1,0 +1,22 @@
+# dsh-riskproof bundle patch — inserts the RiskProof security plugin as one
+# row over the profile root. Later bundle patches and the user's profile
+# cordis.patch.yml may override this row's `config` (last write wins).
+#
+# RiskProof hooks `tools/pre-execute` (allow/ask/deny before dispatch) and
+# `tools/result` (provenance + toolchain state). It is a passive layer over the
+# Tool Runtime: it does not register tools of its own, so row order carries no
+# load semantics.
+
+- insert:
+    - id: riskproof
+      name: dsh-riskproof
+      # Defaults below are the schema defaults; uncomment to tune.
+      # config:
+      #   mode: enforce          # enforce | observe
+      #   policy:
+      #     sensitiveExternalAction: deny
+      #     untrustedPrivateAccess: ask
+      #   classification:
+      #     overrides:
+      #       gmail_send: [EXTERNAL_ACTION]
+      #       company_db: [PRIVATE_ACCESS]

@@ -1,0 +1,19 @@
+# Example profile patch: install dsh-riskproof with a tuned policy.
+#
+# Drop this into a DSH profile's cordis.patch.yml (or merge the row into an
+# existing one) to enable RiskProof with the exfiltration demo policy.
+
+- insert:
+    - id: riskproof
+      name: dsh-riskproof
+      config:
+        mode: enforce
+        policy:
+          sensitiveExternalAction: deny
+          untrustedPrivateAccess: ask
+          internalDomains:
+            - acme.internal
+        classification:
+          overrides:
+            gmail_send: [EXTERNAL_ACTION]
+            company_db: [PRIVATE_ACCESS]

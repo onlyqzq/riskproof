@@ -1,56 +1,85 @@
 {
-  "name": "riskproof-monorepo",
+  "name": "dsh-riskproof",
   "version": "0.1.0",
-  "private": true,
+  "description": "Provenance-aware execution security for DeepSeek Harness. Track sensitive data across tool calls and stop risky side effects before execution.",
   "type": "module",
-  "description": "Deterministic enforcement and evidence layer for MCP/AI Agent toolchains — identity, task authority, provenance, policy, proof",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
   "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "ai-agent",
     "agent-security",
-    "approval",
-    "mcp",
-    "tool-call",
-    "risk-analysis",
     "provenance",
+    "information-flow-control",
+    "tool-security",
     "taint-tracking",
-    "policy-engine",
-    "ai-safety"
+    "execution-security",
+    "policy-engine"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/qzq/riskproof.git"
+    "url": "https://github.com/onlyqzq/riskproof.git"
   },
+  "bugs": {
+    "url": "https://github.com/onlyqzq/riskproof/issues"
+  },
+  "homepage": "https://github.com/onlyqzq/riskproof#readme",
   "author": "RiskProof Contributors",
   "license": "Apache-2.0",
-  "workspaces": [
-    "packages/riskproof"
-  ],
   "engines": {
     "node": ">=22"
   },
-  "scripts": {
-    "test": "npm test -w packages/riskproof",
-    "test:unit": "npm test -w packages/riskproof",
-    "test:scenarios": "tsx test-workspace/scripts/run-all-tests.ts",
-    "test:scenarios:cli": "tsx test-workspace/scripts/run-all-tests.ts --cli",
-    "test:proxy": "tsx test-workspace/scripts/test-via-proxy.ts",
-    "test:opa": "npm run build && node scripts/test-opa-wasm.mjs",
-    "test:docker": "node scripts/test-docker.mjs",
-    "test:integration": "npm run test:scenarios && npm run test:scenarios:cli && npm run test:proxy",
-    "test:all": "npm run test:unit && npm run test:integration",
-    "build": "npm run build -w packages/riskproof",
-    "typecheck": "npm run typecheck -w packages/riskproof",
-    "lint": "npm run lint -w packages/riskproof",
-    "check:versions": "node scripts/check-versions.mjs",
-    "benchmark": "npm run build && node scripts/benchmark.mjs",
-    "benchmark:security": "npm run build && node scripts/security-conformance.mjs",
-    "test:conformance": "npm run build && node scripts/security-conformance.mjs --format json",
-    "demo:research": "npm run build && node scripts/research-demo.mjs",
-    "verify": "npm run check:versions && npm run lint && npm run build && npm run test:all",
-    "start": "npm run serve",
-    "demo": "node --import tsx/esm packages/riskproof/src/cli.ts demo",
-    "proxy": "node --import tsx/esm packages/riskproof/src/cli.ts proxy",
-    "serve": "node --import tsx/esm packages/riskproof/src/cli.ts serve",
-    "check": "node --import tsx/esm packages/riskproof/src/cli.ts check"
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
-  "packageManager": "npm@10.9.3"
+  "scripts": {
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "lint": "npm run typecheck",
+    "verify": "npm run lint && npm run build && npm test",
+    "pack:smoke": "npm run build && npm pack --dry-run",
+    "demo": "npm run build && node demo/run-attack-chain.mjs",
+    "prepublishOnly": "npm run verify"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.7"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.7",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.10"
+  }
 }
