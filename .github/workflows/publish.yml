@@ -71,7 +71,12 @@ jobs:
           name: npm-dist
           path: npm-dist
       - name: Publish verified npm tarball
-        run: npm publish npm-dist/dsh-riskproof-*.tgz --access public --provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la npm-dist
+          cd npm-dist
+          npm publish ./dsh-riskproof-*.tgz --access public --provenance
 
   github-release:
     name: Create GitHub Release
