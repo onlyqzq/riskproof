@@ -76,7 +76,17 @@ jobs:
           set -euo pipefail
           ls -la npm-dist
           cd npm-dist
-          npm publish ./dsh-riskproof-*.tgz --access public --provenance
+          tarball="$(ls ./dsh-riskproof-*.tgz)"
+          pkg_json="$(tar -xOf "$tarball" package/package.json)"
+          pkg_name="$(node -p "JSON.parse(process.argv[1]).name" "$pkg_json")"
+          pkg_version="$(node -p "JSON.parse(process.argv[1]).version" "$pkg_json")"
+
+          if npm view "${pkg_name}@${pkg_version}" version >/dev/null 2>&1; then
+            echo "${pkg_name}@${pkg_version} is already published, skipping publish."
+            exit 0
+          fi
+
+          npm publish "$tarball" --access public --provenance
 
   github-release:
     name: Create GitHub Release
