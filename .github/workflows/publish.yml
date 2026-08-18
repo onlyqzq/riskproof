@@ -74,9 +74,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ls -la npm-dist
           cd npm-dist
-          npm publish ./dsh-riskproof-*.tgz --access public --provenance
+          set -- dsh-riskproof-*.tgz
+          tarball=$1
+          version="${tarball#dsh-riskproof-}"
+          version="${version%.tgz}"
+          if npm view "dsh-riskproof@${version}" version >/dev/null 2>&1; then
+            echo "dsh-riskproof@${version} is already published — skipping publish."
+            exit 0
+          fi
+          npm publish "./${tarball}" --access public --provenance
 
   github-release:
     name: Create GitHub Release
