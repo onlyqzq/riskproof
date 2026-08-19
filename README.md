@@ -179,6 +179,7 @@ See [docs/security-model.md](docs/security-model.md) for the complete threat mod
 
 ## Documentation
 
+- [Installation](docs/installation.md)
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security-model.md)
 - [Provenance & taint](docs/provenance.md)
