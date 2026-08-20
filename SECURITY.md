@@ -51,6 +51,8 @@ Taint detection is pattern-based and additive. It can be evaded by an adversary 
 
 Proofs are audit evidence of RiskProof's own decision, not proof that a real-world side effect did or did not occur. A `deny` proof means the call was blocked at the pipeline; a successful tool result is not proof that its external effect happened.
 
+Optional JSONL persistence contains redacted decision metadata, source ids, and taint labels, not raw arguments or results. New files use mode `0600`; deployers must secure the parent directory and define rotation, retention, and backup policies.
+
 ### Single-process scope
 
 State is per-session and in-memory. It does not span processes, machines, or sessions. Restarting the harness resets provenance and toolchain state.
@@ -67,4 +69,4 @@ Please report privately rather than opening a public issue. Include:
 - a minimal reproduction
 - whether the issue is a bypass (false negative), a false positive, or a stability/DoS issue
 
-Send reports to the maintainers via the project's private security channel. We aim to acknowledge within 7 days and publish a fix + advisory for confirmed issues.
+Submit reports through [GitHub's private security advisory form](https://github.com/onlyqzq/dsh-riskproof/security/advisories/new). We aim to acknowledge within 7 days and publish a fix and advisory for confirmed issues.

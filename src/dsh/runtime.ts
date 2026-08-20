@@ -24,11 +24,12 @@ import type {
   ToolSecurityContext,
 } from "../core/types.js";
 import { EMPTY_TOOLCHAIN_STATE } from "../core/types.js";
+import { argumentsAsRecord } from "../core/arguments.js";
 import { evaluate, type EnginePolicy } from "../core/engine.js";
 import { detectValueTaints, enrichArgumentTaints, inferKindFromTool } from "../core/taint.js";
 import { classifyTool } from "../classification/classifier.js";
 import { normalizeOverrides, type CapabilityOverrides } from "../classification/overrides.js";
-import { ProofStore, newProofId } from "../proof/proof-store.js";
+import { ProofStore, newProofId, type ProofStoreStats } from "../proof/proof-store.js";
 import { RuntimeState } from "./runtime-state.js";
 import {
   configDecisionToInternal,
@@ -38,7 +39,8 @@ import {
 
 /** Cached capability resolution, invalidated on `tools/change`. */
 class CapabilityResolver {
-  private readonly cache = new Map<string, SecurityCapability[]>();
+  private readonly globalCache = new Map<string, SecurityCapability[]>();
+  private scopedCache = new WeakMap<Agent, Map<string, SecurityCapability[]>>();
 
   constructor(
     private readonly ctx: Context,
@@ -46,9 +48,13 @@ class CapabilityResolver {
   ) {}
 
   resolve(name: string, agent?: Agent): SecurityCapability[] {
-    const override = this.overrides[name];
-    if (override) return [...override];
-    const cached = this.cache.get(name);
+    if (Object.hasOwn(this.overrides, name)) return [...this.overrides[name]];
+    let cache = this.globalCache;
+    if (agent) {
+      cache = this.scopedCache.get(agent) ?? new Map<string, SecurityCapability[]>();
+      this.scopedCache.set(agent, cache);
+    }
+    const cached = cache.get(name);
     if (cached) return [...cached];
 
     let definition = this.ctx.tools.get(name);
@@ -59,12 +65,13 @@ class CapabilityResolver {
       description: definition?.description,
       inputSchema: definition?.parameters,
     });
-    this.cache.set(name, capabilities);
+    cache.set(name, capabilities);
     return [...capabilities];
   }
 
   invalidate(): void {
-    this.cache.clear();
+    this.globalCache.clear();
+    this.scopedCache = new WeakMap<Agent, Map<string, SecurityCapability[]>>();
   }
 }
 
@@ -73,16 +80,23 @@ function buildEnginePolicy(config: RiskProofConfig["policy"]): EnginePolicy {
     sensitiveExternalAction: configDecisionToInternal(config.sensitiveExternalAction),
     untrustedPrivateAccess: configDecisionToInternal(config.untrustedPrivateAccess),
     untrustedCodeExecution: configDecisionToInternal(config.untrustedCodeExecution),
+    untrustedLocalMutation: configDecisionToInternal(config.untrustedLocalMutation),
+    credentialAccessAfterUntrusted: configDecisionToInternal(config.credentialAccessAfterUntrusted),
+    sensitivePathRead: configDecisionToInternal(config.sensitivePathRead),
+    sensitivePathMutation: configDecisionToInternal(config.sensitivePathMutation),
+    destructiveOperation: configDecisionToInternal(config.destructiveOperation),
+    remoteScriptExecution: configDecisionToInternal(config.remoteScriptExecution),
+    unlistedExternalAction: configDecisionToInternal(config.unlistedExternalAction),
     unknownTool: configDecisionToInternal(config.unknownTool),
     internalDomains: [...config.internalDomains],
+    blockedDomains: [...config.blockedDomains],
+    allowedExternalDomains: [...config.allowedExternalDomains],
+    sensitivePathPatterns: [...config.sensitivePathPatterns],
   };
 }
 
 function argsAsRecord(args: unknown): Record<string, unknown> {
-  if (typeof args === "object" && args !== null && !Array.isArray(args)) {
-    return args as Record<string, unknown>;
-  }
-  return {};
+  return argumentsAsRecord(args);
 }
 
 export class RiskProofRuntime {
@@ -97,7 +111,10 @@ export class RiskProofRuntime {
     private readonly config: RiskProofConfig,
   ) {
     this.state = new RuntimeState(config);
-    this.proofStore = new ProofStore({ maxRecords: config.proof.maxRecords });
+    this.proofStore = new ProofStore({
+      maxRecords: config.proof.maxRecords,
+      file: config.proof.file,
+    });
     this.resolver = new CapabilityResolver(ctx, normalizeOverrides(config.classification.overrides));
     this.enginePolicy = buildEnginePolicy(config.policy);
     this.logger = ctx.logger("riskproof");
@@ -106,9 +123,14 @@ export class RiskProofRuntime {
   /** `tools/pre-execute` waterfall listener body. */
   async preExecute(exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> {
     const decision = this.evaluate(exec);
-    const mine = decisionToPreToolDecision(decision.decision, decision.reason);
+    const proofId = this.recordProof(exec, decision);
+    const guidance = decision.remediations.slice(0, 2).join(" ");
+    const reasonParts = [decision.reason];
+    if (guidance) reasonParts.push(`Recommended action: ${guidance}`);
+    if (proofId) reasonParts.push(`proof ${proofId}`);
+    const reason = reasonParts.join("; ");
+    const mine = decisionToPreToolDecision(decision.decision, reason);
 
-    this.recordProof(exec, decision);
     if (this.config.mode === "observe" && mine.kind !== "allow") {
       this.logger.warn(
         `[observe] would ${mine.kind === "deny" ? "deny" : "ask"} tool '${exec.name}': ${decision.reason}`,
@@ -134,10 +156,16 @@ export class RiskProofRuntime {
     const session = this.state.get(exec.agent?.id);
     const capabilities = this.resolver.resolve(exec.name, exec.agent);
     const kind = inferKindFromTool(exec.name, capabilities);
-    const entry = session.tracker.record(kind, result.value, exec.name, detectValueTaints(result.value));
+    let contextIds: string[] = [];
+    try {
+      const entry = session.tracker.record(kind, result.value, exec.name, detectValueTaints(result.value));
+      if (entry) contextIds = [entry.id];
+    } catch (error) {
+      this.logger.warn(`could not index result from tool '${exec.name}': ${safeErrorMessage(error)}`);
+    }
 
-    if (this.config.toolchain.enabled && entry) {
-      session.guard.recordEvent(exec.name, capabilities, [entry.id]);
+    if (this.config.toolchain.enabled) {
+      session.guard.recordEvent(exec.name, capabilities, contextIds);
     }
     return undefined;
   }
@@ -157,13 +185,18 @@ export class RiskProofRuntime {
     return this.proofStore.list();
   }
 
+  /** Aggregate counts over the currently retained proof ring. */
+  proofStats(): ProofStoreStats {
+    return this.proofStore.stats();
+  }
+
   private evaluate(exec: ToolExecution): SecurityDecision {
     const capabilities = this.resolver.resolve(exec.name, exec.agent);
     const session = this.state.get(exec.agent?.id);
     const args = argsAsRecord(exec.arguments);
 
-    let provenance: Record<string, string[]> = {};
-    let taints: Record<string, TaintLabel[]> = {};
+    let provenance = Object.create(null) as Record<string, string[]>;
+    let taints = Object.create(null) as Record<string, TaintLabel[]>;
     if (this.config.provenance.enabled || this.config.taint.enabled) {
       const mapping = session.mapper.mapArguments(args);
       provenance = mapping.provenance;
@@ -192,8 +225,8 @@ export class RiskProofRuntime {
     return evaluate(context, this.enginePolicy);
   }
 
-  private recordProof(exec: ToolExecution, decision: SecurityDecision): void {
-    if (!this.config.proof.enabled) return;
+  private recordProof(exec: ToolExecution, decision: SecurityDecision): string | undefined {
+    if (!this.config.proof.enabled) return undefined;
     const proof: SecurityProof = {
       proofId: newProofId(exec.name, decision.decision, decision.timestamp),
       tool: exec.name,
@@ -206,13 +239,24 @@ export class RiskProofRuntime {
         id: rule.id,
         triggeredArgs: [...rule.triggeredArgs],
         evidence: [...rule.evidence],
+        remediation: rule.remediation,
       })),
       provenanceSummary: decision.provenance,
       taintSummary: decision.taints,
       toolchain: decision.toolchain,
       reason: decision.reason,
+      remediations: [...decision.remediations],
       timestamp: decision.timestamp,
     };
-    this.proofStore.save(proof);
+    try {
+      return this.proofStore.save(proof);
+    } catch (error) {
+      this.logger.warn(`could not persist RiskProof proof: ${safeErrorMessage(error)}`);
+      return proof.proofId;
+    }
   }
+}
+
+function safeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message.slice(0, 500) : "unknown error";
 }

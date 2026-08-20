@@ -14,7 +14,13 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 
-import { Config, type RiskProofConfig } from "./config.js";
+import {
+  Config,
+  POLICY_DEFAULTS,
+  POLICY_PRESETS,
+  type PolicyPreset,
+  type RiskProofConfig,
+} from "./config.js";
 import { RiskProofRuntime } from "./dsh/runtime.js";
 
 /** Cordis plugin name (used by loader diagnostics). */
@@ -23,8 +29,8 @@ export const name = "riskproof";
 /** Hard dependency: RiskProof is meaningless without the tool runtime. */
 export const inject = ["tools"];
 
-export { Config };
-export type { RiskProofConfig };
+export { Config, POLICY_DEFAULTS, POLICY_PRESETS };
+export type { PolicyPreset, RiskProofConfig };
 
 /**
  * Wire RiskProof into the DSH tool pipeline. Every listener, guard, and cache
@@ -50,6 +56,24 @@ export {
   type EnginePolicy,
 } from "./core/engine.js";
 export {
+  argumentLeaves,
+  argumentsAsRecord,
+  flattenArguments,
+  ARGUMENT_TRAVERSAL_LIMITS,
+  type ArgumentLeaf,
+} from "./core/arguments.js";
+export {
+  analyzeCommandRisks,
+  type CommandRiskFinding,
+  type CommandRiskKind,
+} from "./core/command-risk.js";
+export {
+  findSensitivePaths,
+  matchesPathPattern,
+  normalizePathForPolicy,
+  type SensitivePathFinding,
+} from "./core/path-policy.js";
+export {
   classifyTool,
   type ToolMetadata,
 } from "./classification/classifier.js";
@@ -61,5 +85,5 @@ export {
 } from "./provenance/context-tracker.js";
 export { ProvenanceMapper, type ProvenanceMapping } from "./provenance/mapper.js";
 export { ToolchainGuard, TOOLCHAIN_GUARD_LIMITS, type ToolchainEvent } from "./toolchain/guard.js";
-export { ProofStore, newProofId } from "./proof/proof-store.js";
+export { ProofStore, newProofId, type ProofStoreStats } from "./proof/proof-store.js";
 export * from "./core/types.js";

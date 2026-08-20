@@ -37,6 +37,20 @@ const LOCAL_MUTATION_TARGET = /\b(?:file|path|directory|folder|repository|repo|c
 
 const NETWORK_SINK_FIELD = /\b(?:url|uri|endpoint|recipient|recipients|to|cc|bcc|body|payload|content|message|query|webhook|address|destination|target|channel|topic)\b/;
 
+// DSH plugins may expose localized metadata. Keep these patterns explicit and
+// deterministic so Chinese descriptions receive the same baseline scrutiny.
+const ZH_CODE_EXECUTION = /(?:(?:执行|运行|启动).{0,8}(?:命令|脚本|代码|程序|终端)|命令行|终端|命令执行|代码执行|脚本执行)/;
+const ZH_CREDENTIAL = /(?:凭据|凭证|密钥|密码|令牌|保险库|钥匙串|访问令牌|访问密钥|接口密钥)/;
+const ZH_INGEST_ACTION = /(?:抓取|获取|读取|搜索|检索|浏览|访问|下载|爬取|订阅|查询)/;
+const ZH_EXTERNAL_SOURCE = /(?:网页|网站|互联网|外部网络|远程|邮件|邮箱|新闻|信息流|浏览器|频道|社交媒体|网址|链接)/;
+const ZH_DISCLOSURE_ACTION = /(?:发送|发布|上传|通知|转发|提交|分享|回复|推送|写入|更新|创建)/;
+const ZH_DISCLOSURE_TARGET = /(?:邮件|邮箱|消息|网页|网站|接口|端点|外部网络|远程|飞书|钉钉|企业微信|文档|页面|日历|网盘|云盘|频道)/;
+const ZH_PRIVATE_ACTION = /(?:读取|获取|列出|搜索|查询|检查|检索|加载|打开|查看|导出|访问|查找)/;
+const ZH_PRIVATE_SOURCE = /(?:文件|文件系统|目录|文件夹|工作区|仓库|配置|环境变量|历史记录|剪贴板|联系人|数据库|客户|患者|医疗|财务|发票|日志|表格|知识库|内部数据|私有数据)/;
+const ZH_LOCAL_MUTATION_ACTION = /(?:写入|创建|更新|删除|移除|移动|重命名|追加|提交|合并|安装|保存)/;
+const ZH_LOCAL_MUTATION_TARGET = /(?:文件|路径|目录|文件夹|仓库|配置|设置|数据库|工作区|分支)/;
+const ZH_NETWORK_SINK_FIELD = /(?:网址|链接|端点|收件人|抄送|正文|内容|消息|地址|目的地|目标|频道)/;
+
 /** Normalize a metadata string into a lowercase, word-separated search text. */
 function normalizeText(value: string): string {
   return value
@@ -91,17 +105,18 @@ export function classifyTool(
   const capabilities = new Set<SecurityCapability>();
 
   // General-purpose code execution can implement every phase (curl/read/send).
-  if (CODE_EXECUTION.test(semantic)) {
+  if (CODE_EXECUTION.test(semantic) || ZH_CODE_EXECUTION.test(semantic)) {
     capabilities.add("CODE_EXECUTION");
   }
 
-  if (CREDENTIAL.test(semantic)) {
+  if (CREDENTIAL.test(semantic) || ZH_CREDENTIAL.test(semantic)) {
     capabilities.add("CREDENTIAL_ACCESS");
   }
 
   // External ingestion: an ingest action against an external source.
   if (
     (INGEST_ACTION.test(semantic) && EXTERNAL_SOURCE.test(all)) ||
+    (ZH_INGEST_ACTION.test(semantic) && ZH_EXTERNAL_SOURCE.test(all)) ||
     /\b(?:fetch url|web search|visit page|scrape|crawl|read mail|read email|channel history|social feed|web fetch)\b/.test(semantic)
   ) {
     capabilities.add("EXTERNAL_INGESTION");
@@ -111,8 +126,10 @@ export function classifyTool(
   // network sink field in the schema.
   if (
     (DISCLOSURE_ACTION.test(semantic) && DISCLOSURE_TARGET.test(all)) ||
+    (ZH_DISCLOSURE_ACTION.test(semantic) && ZH_DISCLOSURE_TARGET.test(all)) ||
     /\b(?:send mail|send email|post message|publish post|create issue|create campaign|upload file|send message|post comment)\b/.test(semantic) ||
-    (DISCLOSURE_ACTION.test(semantic) && NETWORK_SINK_FIELD.test(fieldNames))
+    (DISCLOSURE_ACTION.test(semantic) && NETWORK_SINK_FIELD.test(fieldNames)) ||
+    (ZH_DISCLOSURE_ACTION.test(semantic) && ZH_NETWORK_SINK_FIELD.test(fieldNames))
   ) {
     capabilities.add("EXTERNAL_ACTION");
   }
@@ -120,6 +137,7 @@ export function classifyTool(
   // Private access: a read action against an internal/private source.
   if (
     (PRIVATE_ACTION.test(semantic) && PRIVATE_SOURCE.test(all)) ||
+    (ZH_PRIVATE_ACTION.test(semantic) && ZH_PRIVATE_SOURCE.test(all)) ||
     /\b(?:read file|print env|get config|execute query|query database|read database|read data)\b/.test(semantic)
   ) {
     capabilities.add("PRIVATE_ACCESS");
@@ -128,7 +146,8 @@ export function classifyTool(
   // Local mutation: a write action against a local target, without an
   // external disclosure target.
   if (
-    (LOCAL_MUTATION_ACTION.test(semantic) && LOCAL_MUTATION_TARGET.test(all)) &&
+    ((LOCAL_MUTATION_ACTION.test(semantic) && LOCAL_MUTATION_TARGET.test(all)) ||
+      (ZH_LOCAL_MUTATION_ACTION.test(semantic) && ZH_LOCAL_MUTATION_TARGET.test(all))) &&
     !capabilities.has("EXTERNAL_ACTION")
   ) {
     capabilities.add("LOCAL_MUTATION");

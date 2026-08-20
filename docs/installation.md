@@ -4,19 +4,13 @@ RiskProof is a DeepSeek Harness plugin. Pick the install path that matches how y
 
 ## From npm (recommended)
 
-Prebuilt and fastest — no build step, no `allowBuilds` approval:
+Prebuilt and fastest — no build step or `allowBuilds` approval. DSH requires Node.js 22.19+ and `pnpm` on `PATH` for plugin management:
 
 ```bash
 dsh plugin --profile <profile> add dsh-riskproof
 ```
 
-Then add the row to the profile's `cordis.patch.yml` (or merge it into an existing one):
-
-```yaml
-- insert:
-    - id: riskproof
-      name: dsh-riskproof
-```
+The package's `dsh.bundle.patch` declaration automatically appends its bundled `riskproof` row to the profile's bundle stack. Do not insert a second row just to enable it.
 
 Verify it is composed:
 
@@ -28,19 +22,28 @@ You should see a `riskproof` row from the `dsh-riskproof` package.
 
 ## From a prebuilt GitHub Release tarball
 
-Each release publishes a signed tarball (with provenance). Useful for pinning an
-exact version without going through npm:
+Each GitHub release publishes the exact tarball built by release CI. npm publication separately uses npm provenance. The tarball is useful for pinning an exact version:
 
 ```bash
 dsh plugin --profile <profile> add \
-  https://github.com/onlyqzq/riskproof/releases/download/v0.1.0/dsh-riskproof-0.1.0.tgz
+  https://github.com/onlyqzq/dsh-riskproof/releases/download/v0.2.0/dsh-riskproof-0.2.0.tgz
 ```
 
 ## From source
 
+Git-hosted installs run the package's `prepare` build and therefore require
+DSH/pnpm build-script approval:
+
 ```bash
-git clone https://github.com/onlyqzq/riskproof
-cd riskproof
+dsh plugin --profile <profile> add \
+  github:onlyqzq/dsh-riskproof --allow-build dsh-riskproof
+```
+
+For development from a local checkout:
+
+```bash
+git clone https://github.com/onlyqzq/dsh-riskproof
+cd dsh-riskproof
 npm ci
 npm run build
 dsh plugin --profile <profile> add ./   # installs the local package

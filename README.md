@@ -45,33 +45,28 @@ RiskProof is a layer over the DSH Tool Runtime, not another Agent Runtime. It ne
 ```bash
 # add the plugin to a DSH profile
 dsh plugin --profile <profile> add dsh-riskproof
+
+# confirm the bundled patch was composed
+dsh --profile <profile> --dump-config
 ```
 
-Minimal `cordis.patch.yml` (the schema defaults are already safe):
+The package declares a DSH bundle, so `plugin add` composes its `riskproof` row automatically. No second install or manual row is required. The schema defaults are safe; RiskProof silently tracks context and only asks or blocks when a risky cross-tool flow appears.
+
+To tune it, override the bundled row from the profile's later `cordis.patch.yml` layer:
 
 ```yaml
-- insert:
-    - id: riskproof
-      name: dsh-riskproof
-```
-
-Then use DSH normally. RiskProof silently tracks security context and only asks or blocks when a risky cross-tool flow appears.
-
-To tune it:
-
-```yaml
-- insert:
-    - id: riskproof
-      name: dsh-riskproof
-      config:
-        mode: enforce            # enforce | observe
-        policy:
-          sensitiveExternalAction: deny
-          untrustedPrivateAccess: ask
-        classification:
-          overrides:
-            gmail_send: [EXTERNAL_ACTION]
-            company_db: [PRIVATE_ACCESS]
+- id: riskproof
+  config:
+    mode: enforce            # enforce | observe
+    policy:
+      preset: balanced         # permissive | balanced | strict
+      internalDomains: [acme.internal]
+      blockedDomains: [collector.evil.example]
+      # allowedExternalDomains: [api.approved.example]
+    classification:
+      overrides:
+        gmail_send: [EXTERNAL_ACTION]
+        company_db: [PRIVATE_ACCESS]
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
@@ -91,7 +86,7 @@ sequenceDiagram
 
     A->>T: database_query(sql)
     T->>R: tools/pre-execute
-    R-->>T: allow (PRIVATE_ACCESS recorded, CUSTOMER_DATA tagged)
+    R-->>T: ask (operator approves private access)
     T-->>A: CUST-8842 balance 125000
 
     A->>T: send_email(to=external, body=CUST-8842…)
@@ -128,9 +123,17 @@ Identify the `EXTERNAL_INGESTION → PRIVATE_ACCESS → EXTERNAL_ACTION` pattern
 
 Block or ask *before* the side effect runs, through the native `tools/pre-execute` gate.
 
+### Guard sensitive surfaces
+
+Gate credential-file paths, high-confidence destructive commands, download-and-execute pipelines, blocked destinations, and credentials embedded in network-capable commands.
+
+### Adapt without rewriting rules
+
+Start with the default `balanced` preset, roll out with `permissive`, or use `strict`; every configurable decision can still be overridden individually.
+
 ### Explain every decision
 
-Generate structured, privacy-preserving security evidence for every decision.
+Generate structured, privacy-preserving security evidence and actionable remediation for every decision. Keep proofs in memory or append them to an operator-controlled JSONL file.
 
 ## How it works
 
@@ -186,24 +189,28 @@ See [docs/security-model.md](docs/security-model.md) for the complete threat mod
 - [Toolchain model](docs/toolchain.md)
 - [Configuration](docs/configuration.md)
 - [Development](docs/development.md)
+- [v0.2 security-plugin benchmark](docs/v0.2-security-plugin-benchmark.md)
+- [Awesome DSH Plugin review alignment](docs/awesome-dsh-plugin-review.md)
 - [Migrating from RiskProof (MCP)](docs/migration-from-riskproof.md)
 
 ## Roadmap
 
-### v0.1 (current)
+### v0.2 (current)
 
 - DSH-native runtime (`tools/pre-execute`, `tools/result`)
 - Provenance + taint tracking
 - Cross-tool EIT → PAT → NAT detection
-- Privacy-preserving proof
+- Privacy-preserving proof with optional JSONL persistence
+- Policy presets, sensitive-path gates, deterministic command-risk checks, and egress domain policy
+- Remediation guidance and per-rule proof statistics
 
-### v0.2
+### v0.3
 
 - Tool identity continuity
 - Task-aware policy
 - Execution receipts
 
-### v0.3
+### Later
 
 - Output-side information-flow control
 - Trusted declassification

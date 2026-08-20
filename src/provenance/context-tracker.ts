@@ -114,13 +114,11 @@ export class ContextTracker {
     for (const stored of this.entries) {
       let score = 0;
       for (const needle of needles) {
-        if (matchesNeedle(
+        score = Math.max(score, matchScore(
           stored.searchable,
           needle,
           exactOnly ? Number.POSITIVE_INFINITY : this.limits.minMatchLength,
-        )) {
-          score = Math.max(score, needle.length);
-        }
+        ));
       }
       if (score > 0) matches.push({ entry: publicEntry(stored), score });
     }
@@ -219,9 +217,25 @@ function extractNeedles(
     .sort((left, right) => right.length - left.length);
 }
 
-function matchesNeedle(haystacks: readonly string[], needle: string, minLength: number): boolean {
-  if (needle.length < minLength) return haystacks.some((text) => text === needle);
-  return haystacks.some((text) => text.includes(needle));
+function matchScore(haystacks: readonly string[], needle: string, minLength: number): number {
+  let score = 0;
+  for (const text of haystacks) {
+    if (text === needle) {
+      score = Math.max(score, needle.length);
+      continue;
+    }
+    if (needle.length >= minLength && text.includes(needle)) {
+      score = Math.max(score, needle.length);
+    }
+    // A later argument commonly wraps a copied result with explanatory text.
+    // Require a longer fragment in this reverse direction to avoid matching
+    // short/common result values such as "true" or "done".
+    const reverseFloor = Math.max(minLength, 12);
+    if (text.length >= reverseFloor && needle.includes(text)) {
+      score = Math.max(score, text.length);
+    }
+  }
+  return score;
 }
 
 function validateOptions(options: ContextTrackerOptions): Required<ContextTrackerOptions> {

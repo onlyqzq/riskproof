@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22]
+        node-version: ["22.19", "24"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -37,7 +37,7 @@ jobs:
       - name: Build
         run: npm run build
       - name: Unit + integration + security regression tests
-        run: npm test
+        run: npm run test:coverage
 
   npm-package:
     name: npm package smoke
@@ -46,16 +46,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: "22.19"
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm run build
-      - name: Pack and install the exact published file set
+      - name: Pack from clean source and install the exact published file set
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/riskproof-pack /tmp/riskproof-install
+          npm run clean
           npm pack --pack-destination /tmp/riskproof-pack
           npm install --prefix /tmp/riskproof-install /tmp/riskproof-pack/dsh-riskproof-*.tgz
           (
@@ -64,3 +64,33 @@ jobs:
           )
           test -f /tmp/riskproof-install/node_modules/dsh-riskproof/cordis.patch.yml
           test -f /tmp/riskproof-install/node_modules/dsh-riskproof/dist/index.js
+      - name: Install directly from the checked-out Git source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/riskproof-source-install
+          npm install --prefix /tmp/riskproof-source-install "git+file://${GITHUB_WORKSPACE}"
+          test -f /tmp/riskproof-source-install/node_modules/dsh-riskproof/dist/index.js
+          (
+            cd /tmp/riskproof-source-install
+            node --input-type=module -e "import('dsh-riskproof').then((m) => { if (typeof m.apply !== 'function') process.exit(1) })"
+          )
+      - name: Install the tarball through the DSH plugin manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@11.19.0
+          export DSH_HOME="$RUNNER_TEMP/riskproof-dsh-home"
+          npx --yes @deepseek-ai/dsh@0.1.0-rc.7 \
+            plugin --profile riskproof-smoke add /tmp/riskproof-pack/dsh-riskproof-*.tgz
+          npx --yes @deepseek-ai/dsh@0.1.0-rc.7 \
+            --profile riskproof-smoke --dump-config > "$RUNNER_TEMP/riskproof-composed.yml"
+          grep -q 'name: dsh-riskproof' "$RUNNER_TEMP/riskproof-composed.yml"
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const manifest = JSON.parse(readFileSync(
+              process.env.DSH_HOME + '/profiles/riskproof-smoke/package.json',
+              'utf8',
+            ));
+            if (!manifest.dsh?.profile?.bundles?.includes('dsh-riskproof')) process.exit(1);
+          "

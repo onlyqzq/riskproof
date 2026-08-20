@@ -12,12 +12,16 @@ export interface MockToolDef {
 
 export function makeMockCtx(
   toolDefs: Record<string, MockToolDef> = {},
+  scopedToolDefs: Record<string, Record<string, MockToolDef>> = {},
 ): Context {
   const logger = { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} };
   return {
     tools: {
-      get(name: string): MockToolDef & { name: string } | undefined {
-        const def = toolDefs[name];
+      get(name: string, agent?: { id?: string }): MockToolDef & { name: string } | undefined {
+        const scoped = agent?.id ? scopedToolDefs[agent.id] : undefined;
+        const def = scoped && Object.hasOwn(scoped, name)
+          ? scoped[name]
+          : Object.hasOwn(toolDefs, name) ? toolDefs[name] : undefined;
         return def ? { name, description: def.description, parameters: def.parameters ?? {} } : undefined;
       },
     },

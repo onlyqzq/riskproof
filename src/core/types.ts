@@ -84,6 +84,8 @@ export interface ToolchainState {
   sawIngestion: boolean;
   /** Whether a PRIVATE_ACCESS capability was observed. */
   sawPrivateAccess: boolean;
+  /** Whether PRIVATE_ACCESS was observed after an earlier EXTERNAL_INGESTION. */
+  sawIngestionThenPrivateAccess?: boolean;
   /** Whether an EXTERNAL_ACTION capability was observed. */
   sawExternalAction: boolean;
   /** Recent capability path (bounded, labels only) for diagnostics. */
@@ -93,6 +95,7 @@ export interface ToolchainState {
 export const EMPTY_TOOLCHAIN_STATE: ToolchainState = Object.freeze({
   sawIngestion: false,
   sawPrivateAccess: false,
+  sawIngestionThenPrivateAccess: false,
   sawExternalAction: false,
   path: [],
 });
@@ -135,6 +138,7 @@ export interface MatchedRule {
   triggeredArgs: string[];
   evidence: string[];
   reason?: string;
+  remediation?: string;
 }
 
 /** The engine's deterministic decision. */
@@ -144,6 +148,8 @@ export interface SecurityDecision {
   matchedRules: MatchedRule[];
   reason: string;
   evidence: string[];
+  /** Deduplicated operator actions that can resolve matched findings. */
+  remediations: string[];
   /** Redacted provenance summary (source ids only). */
   provenance: Record<string, string[]>;
   /** Taint summary (labels only). */
@@ -161,11 +167,17 @@ export interface SecurityProof {
   nested?: boolean;
   decision: Decision;
   riskLevel: RiskLevel;
-  matchedRules: Array<{ id: string; triggeredArgs: string[]; evidence: string[] }>;
+  matchedRules: Array<{
+    id: string;
+    triggeredArgs: string[];
+    evidence: string[];
+    remediation?: string;
+  }>;
   provenanceSummary: Record<string, string[]>;
   taintSummary: Record<string, TaintLabel[]>;
   toolchain: ToolchainState;
   reason: string;
+  remediations: string[];
   timestamp: string;
 }
 

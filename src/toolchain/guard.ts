@@ -60,21 +60,33 @@ export class ToolchainGuard {
     const recent = this.events.slice(-this.limits.chainWindow);
     let sawIngestion = false;
     let sawPrivateAccess = false;
+    let sawIngestionThenPrivateAccess = false;
     let sawExternalAction = false;
     const path: string[] = [];
     for (const event of recent) {
+      // Check PAT before updating EIT for this event: one multi-capability tool
+      // is not by itself a cross-tool EIT -> PAT sequence.
+      if (event.capabilities.includes("PRIVATE_ACCESS")) {
+        sawPrivateAccess = true;
+        if (sawIngestion) sawIngestionThenPrivateAccess = true;
+      }
       if (event.capabilities.includes("EXTERNAL_INGESTION")) sawIngestion = true;
-      if (event.capabilities.includes("PRIVATE_ACCESS")) sawPrivateAccess = true;
       if (event.capabilities.includes("EXTERNAL_ACTION")) sawExternalAction = true;
       for (const capability of event.capabilities) {
         const label = capabilityLabel(capability);
-        if (!path.includes(label)) path.push(label);
+        path.push(label);
       }
     }
     if (!sawIngestion && !sawPrivateAccess && !sawExternalAction && path.length === 0) {
       return EMPTY_TOOLCHAIN_STATE;
     }
-    return { sawIngestion, sawPrivateAccess, sawExternalAction, path };
+    return {
+      sawIngestion,
+      sawPrivateAccess,
+      sawIngestionThenPrivateAccess,
+      sawExternalAction,
+      path,
+    };
   }
 
   list(): ToolchainEvent[] {

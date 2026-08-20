@@ -45,33 +45,28 @@ RiskProof 是 DSH Tool Runtime 之上的一层安全策略，而不是另一套 
 ```bash
 # 把插件加入某个 DSH profile
 dsh plugin --profile <profile> add dsh-riskproof
+
+# 确认包内 patch 已被组合
+dsh --profile <profile> --dump-config
 ```
 
-最小 `cordis.patch.yml`（schema 默认值已经是安全的）：
+该包声明了 DSH bundle，`plugin add` 会自动组合其中的 `riskproof` 行，不需要再次手工插入。Schema 默认值已经是安全的；RiskProof 会静默追踪安全上下文，只有当出现危险的跨工具数据流时才会询问或拦截。
+
+如需调整，可在随后加载的 profile `cordis.patch.yml` 中覆盖 bundle 行：
 
 ```yaml
-- insert:
-    - id: riskproof
-      name: dsh-riskproof
-```
-
-然后正常使用 DSH 即可。RiskProof 会静默追踪安全上下文，只有当出现危险的跨工具数据流时才会询问或拦截。
-
-如需调整：
-
-```yaml
-- insert:
-    - id: riskproof
-      name: dsh-riskproof
-      config:
-        mode: enforce            # enforce | observe
-        policy:
-          sensitiveExternalAction: deny
-          untrustedPrivateAccess: ask
-        classification:
-          overrides:
-            gmail_send: [EXTERNAL_ACTION]
-            company_db: [PRIVATE_ACCESS]
+- id: riskproof
+  config:
+    mode: enforce            # enforce | observe
+    policy:
+      preset: balanced         # permissive | balanced | strict
+      internalDomains: [acme.internal]
+      blockedDomains: [collector.evil.example]
+      # allowedExternalDomains: [api.approved.example]
+    classification:
+      overrides:
+        gmail_send: [EXTERNAL_ACTION]
+        company_db: [PRIVATE_ACCESS]
 ```
 
 完整配置参考见 [docs/configuration.md](docs/configuration.md)。
@@ -91,7 +86,7 @@ sequenceDiagram
 
     A->>T: database_query(sql)
     T->>R: tools/pre-execute
-    R-->>T: allow（记录 PRIVATE_ACCESS，标记 CUSTOMER_DATA）
+    R-->>T: ask（操作者批准私密数据访问）
     T-->>A: CUST-8842 balance 125000
 
     A->>T: send_email(to=external, body=CUST-8842…)
@@ -120,9 +115,17 @@ sequenceDiagram
 
 通过原生 `tools/pre-execute` 门，在副作用执行前拦截或询问。
 
+### 保护敏感操作面
+
+在执行前检查凭据文件路径、高置信破坏性命令、下载后直接执行的管道、被阻止的目的地，以及网络命令中携带的凭据。
+
+### 按场景调整策略
+
+默认使用 `balanced`，初次上线可选 `permissive`，高安全环境可选 `strict`；每个可配置裁决仍可单独覆盖。
+
 ### 解释每一次决策
 
-为每一次裁决生成结构化、保护隐私的安全证据。
+为每一次裁决生成结构化、保护隐私的安全证据和可执行处置建议；proof 既可保留在内存中，也可追加到操作者管理的 JSONL 文件。
 
 ## 工作原理
 
@@ -171,30 +174,35 @@ RiskProof **不能替代**：
 
 ## 文档
 
+- [安装](docs/installation.md)
 - [架构](docs/architecture.md)
 - [安全模型](docs/security-model.md)
 - [来源与污点](docs/provenance.md)
 - [工具链模型](docs/toolchain.md)
 - [配置](docs/configuration.md)
 - [开发](docs/development.md)
+- [v0.2 安全插件对比与迭代依据](docs/v0.2-security-plugin-benchmark.md)
+- [Awesome DSH Plugin 收录审核对齐记录](docs/awesome-dsh-plugin-review.md)
 - [从 RiskProof (MCP) 迁移](docs/migration-from-riskproof.md)
 
 ## 路线图
 
-### v0.1（当前）
+### v0.2（当前）
 
 - DSH 原生运行时（`tools/pre-execute`、`tools/result`）
 - 来源 + 污点追踪
 - 跨工具 EIT → PAT → NAT 检测
-- 保护隐私的 proof
+- 保护隐私、可选 JSONL 持久化的 proof
+- 策略预设、敏感路径门控、确定性危险命令检测和出口域名策略
+- 处置建议与按规则聚合的 proof 统计
 
-### v0.2
+### v0.3
 
 - 工具身份连续性
 - 任务感知策略
 - 执行回执
 
-### v0.3
+### 后续
 
 - 输出侧信息流控制
 - 可信降密

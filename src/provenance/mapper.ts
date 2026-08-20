@@ -8,6 +8,7 @@
 
 import type { TaintLabel } from "../core/types.js";
 import type { ContextTracker } from "./context-tracker.js";
+import { argumentLeaves } from "../core/arguments.js";
 
 export interface ProvenanceMapping {
   provenance: Record<string, string[]>;
@@ -18,17 +19,17 @@ export class ProvenanceMapper {
   constructor(private readonly tracker: ContextTracker) {}
 
   mapArguments(args: Record<string, unknown>): ProvenanceMapping {
-    const provenance: Record<string, string[]> = {};
-    const taints: Record<string, TaintLabel[]> = {};
-    for (const [name, value] of Object.entries(args)) {
-      const matches = this.tracker.match(value);
+    const provenance: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
+    const taints: Record<string, TaintLabel[]> = Object.create(null) as Record<string, TaintLabel[]>;
+    for (const leaf of argumentLeaves(args)) {
+      const matches = this.tracker.match(leaf.value);
       if (matches.length === 0) {
-        provenance[name] = ["agent_generated"];
-        taints[name] = [];
+        provenance[leaf.path] = ["agent_generated"];
+        taints[leaf.path] = [];
         continue;
       }
-      provenance[name] = [...new Set(matches.map(({ entry }) => entry.id))];
-      taints[name] = [...new Set(matches.flatMap(({ entry }) => entry.taints))];
+      provenance[leaf.path] = [...new Set(matches.map(({ entry }) => entry.id))];
+      taints[leaf.path] = [...new Set(matches.flatMap(({ entry }) => entry.taints))];
     }
     return { provenance, taints };
   }

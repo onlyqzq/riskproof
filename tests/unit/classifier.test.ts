@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyTool } from "../../src/classification/classifier.js";
+import { normalizeOverrides } from "../../src/classification/overrides.js";
 
 function caps(name: string, description = "", inputSchema: Record<string, unknown> = {}) {
   return classifyTool({ name, description, inputSchema });
@@ -57,5 +58,31 @@ describe("classifyTool", () => {
   it("supports multi-capability tools", () => {
     const result = caps("shell_exec", "Execute a command", { properties: { url: {} } });
     expect(result).toContain("CODE_EXECUTION");
+  });
+
+  it("classifies Chinese web ingestion metadata", () => {
+    expect(caps("网页抓取", "从外部网站获取网页内容")).toContain("EXTERNAL_INGESTION");
+  });
+
+  it("classifies Chinese private access metadata", () => {
+    expect(caps("客户查询", "查询内部数据库中的客户记录")).toContain("PRIVATE_ACCESS");
+  });
+
+  it("classifies Chinese external action metadata", () => {
+    expect(caps("邮件发送", "向收件人发送邮件消息")).toContain("EXTERNAL_ACTION");
+  });
+
+  it("classifies Chinese code and credential metadata", () => {
+    expect(caps("命令执行器", "运行终端命令")).toContain("CODE_EXECUTION");
+    expect(caps("密钥读取", "从保险库读取访问密钥")).toContain("CREDENTIAL_ACCESS");
+  });
+
+  it("treats prototype-like override names as ordinary data", () => {
+    const overrides = normalizeOverrides(JSON.parse(
+      '{"__proto__":["PRIVATE_ACCESS"],"constructor":["EXTERNAL_ACTION"]}',
+    ));
+    expect(Object.hasOwn(overrides, "__proto__")).toBe(true);
+    expect(overrides.__proto__).toEqual(["PRIVATE_ACCESS"]);
+    expect(overrides.constructor).toEqual(["EXTERNAL_ACTION"]);
   });
 });

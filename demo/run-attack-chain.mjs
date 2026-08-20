@@ -11,7 +11,7 @@
 
 import { Context } from "@deepseek-ai/cordis";
 import ToolRuntime, { defineTool } from "@deepseek-ai/dsh-tools";
-import { RiskProofRuntime } from "../dist/index.js";
+import { POLICY_DEFAULTS, RiskProofRuntime } from "../dist/index.js";
 
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
@@ -30,13 +30,7 @@ const runtime = new RiskProofRuntime(root, {
   taint: { enabled: true },
   toolchain: { enabled: true, maxEvents: 128, chainWindow: 12 },
   classification: { overrides: {} },
-  policy: {
-    sensitiveExternalAction: "deny",
-    untrustedPrivateAccess: "ask",
-    untrustedCodeExecution: "deny",
-    unknownTool: "ask",
-    internalDomains: [],
-  },
+  policy: { ...POLICY_DEFAULTS },
   proof: { enabled: true, maxRecords: 1000 },
 });
 root.on("tools/pre-execute", (exec, next) => runtime.preExecute(exec, next));

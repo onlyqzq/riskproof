@@ -19,6 +19,12 @@ describe("taint inference", () => {
     expect(detectValueTaints("api_key=supersecretvalue123")).toContain("SECRET");
   });
 
+  it("detects common provider tokens and private-key headers", () => {
+    expect(detectValueTaints("AKIAIOSFODNN7EXAMPLE")).toContain("API_KEY");
+    expect(detectValueTaints("ghp_abcdefghijklmnopqrstuvwxyz123456")).toContain("API_KEY");
+    expect(detectValueTaints("-----BEGIN OPENSSH PRIVATE KEY-----")).toContain("SECRET");
+  });
+
   it("detects customer data", () => {
     expect(detectValueTaints("customer record for CUST-8842")).toContain("CUSTOMER_DATA");
   });

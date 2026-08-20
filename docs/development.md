@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js >= 22
+- Node.js >= 22.19
 - npm >= 10
 
 ## Setup
@@ -19,7 +19,9 @@ npm install
 | `npm test` | run the full Vitest suite |
 | `npm run typecheck` | strict typecheck of `src/` |
 | `npm run typecheck:test` | strict typecheck of `src/` + `tests/` |
-| `npm run verify` | typecheck + build + test |
+| `npm run check:marketplace` | validate Awesome DSH Plugin-facing package metadata |
+| `npm run verify` | source/test typecheck + build + test |
+| `npm run test:coverage` | run tests and enforce coverage thresholds |
 | `npm run pack:smoke` | build + `npm pack --dry-run` |
 
 ## Layout
@@ -46,7 +48,7 @@ npm pack
 Then install into a fresh profile:
 
 ```bash
-DSH_HOME=/tmp/dsh-riskproof-smoke dsh plugin --profile test add ./dsh-riskproof-0.1.0.tgz
+DSH_HOME=/tmp/dsh-riskproof-smoke dsh plugin --profile test add ./dsh-riskproof-0.2.0.tgz
 DSH_HOME=/tmp/dsh-riskproof-smoke dsh --profile test --dump-config
 ```
 

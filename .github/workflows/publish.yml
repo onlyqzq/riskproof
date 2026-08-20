@@ -29,10 +29,15 @@ jobs:
             echo "Release tags must be canonical SemVer prefixed with v" >&2
             exit 1
           fi
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $package_version" >&2
+            exit 1
+          fi
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: "22.19"
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Verify release

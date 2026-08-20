@@ -7,11 +7,15 @@
 // message body is not mistaken for the actual destination.
 // ============================================================================
 
+import { argumentLeaves } from "./arguments.js";
+
 export interface ExternalDestination {
   field: string;
   target: string;
   kind: "email" | "url";
 }
+
+export type NetworkDestination = ExternalDestination;
 
 const EMAIL_RECIPIENT_FIELD_ALIASES = new Set([
   "to", "cc", "bcc", "mailto",
@@ -35,6 +39,14 @@ function normalizeFieldName(field: string): string {
 
 function normalizeHost(host: string): string {
   return host.toLowerCase().trim().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+}
+
+/** Exact domain/IP or suffix match. `*.example.com` also admits the base. */
+export function matchesDomainPattern(host: string, pattern: string): boolean {
+  const lower = normalizeHost(host);
+  const normalized = normalizeHost(pattern.replace(/^\*\./, ""));
+  if (!normalized) return false;
+  return lower === normalized || lower.endsWith(`.${normalized}`);
 }
 
 /** Extract email domains from a value. */
@@ -72,10 +84,14 @@ export function extractHosts(value: unknown): string[] {
   const candidate = value.trim().replace(/^["']|["']$/g, "");
   if (!candidate || /\s/.test(candidate)) return [...hosts];
   try {
-    const parsed = new URL(
-      /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate) ? candidate : `http://${candidate}`,
-    );
-    hosts.add(normalizeHost(parsed.hostname));
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate);
+    const parsed = new URL(hasScheme ? candidate : `http://${candidate}`);
+    const host = normalizeHost(parsed.hostname);
+    // Do not reinterpret ordinary sink values such as channel="general" as
+    // hosts. Explicit URLs remain valid even with a single-label host.
+    if (hasScheme || host.includes(".") || host.includes(":") || host === "localhost") {
+      hosts.add(host);
+    }
   } catch {
     // not a parseable target; left to downstream validation
   }
@@ -99,12 +115,7 @@ export function isExternalDomain(host: string, internalDomains?: string[]): bool
   if (["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(lower)) return false;
   if (/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/.test(lower)) return false;
   if (!internalDomains?.length) return true;
-  return !internalDomains.some((domain) => {
-    const dl = domain.toLowerCase();
-    return lower === dl ||
-      lower.endsWith("." + dl) ||
-      (dl.startsWith("*.") && (lower.endsWith(dl.slice(1)) || lower === dl.slice(2)));
-  });
+  return !internalDomains.some((domain) => matchesDomainPattern(lower, domain));
 }
 
 /** Whether a host is a cloud metadata or link-local endpoint (never reachable). */
@@ -143,19 +154,25 @@ export function findExternalDestinations(
   args: Record<string, unknown>,
   internalDomains?: string[],
 ): ExternalDestination[] {
+  return findDestinations(args).filter((destination) =>
+    isExternalDomain(destination.target, internalDomains));
+}
+
+/** Find every recognized email/URL destination, regardless of trust policy. */
+export function findDestinations(
+  args: Record<string, unknown>,
+): NetworkDestination[] {
   const destinations: ExternalDestination[] = [];
-  for (const [rawField, value] of Object.entries(args)) {
-    const field = normalizeFieldName(rawField);
+  for (const leaf of argumentLeaves(args)) {
+    const field = normalizeFieldName(leaf.field);
     if (EMAIL_RECIPIENT_FIELD_ALIASES.has(field)) {
-      for (const domain of extractEmailDomains(value)) {
-        if (isExternalDomain(domain, internalDomains)) {
-          destinations.push({ field: rawField, target: domain, kind: "email" });
-        }
+      for (const domain of extractEmailDomains(leaf.value)) {
+        destinations.push({ field: leaf.path, target: domain, kind: "email" });
       }
     }
     if (URL_TARGET_FIELD_ALIASES.has(field)) {
-      for (const host of extractUrlHosts(value)) {
-        destinations.push({ field: rawField, target: host, kind: "url" });
+      for (const host of extractHosts(leaf.value)) {
+        destinations.push({ field: leaf.path, target: host, kind: "url" });
       }
     }
   }

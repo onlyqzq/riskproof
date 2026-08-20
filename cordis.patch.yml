@@ -14,8 +14,9 @@
       # config:
       #   mode: enforce          # enforce | observe
       #   policy:
-      #     sensitiveExternalAction: deny
-      #     untrustedPrivateAccess: ask
+      #     preset: balanced     # permissive | balanced | strict
+      #     internalDomains: [acme.internal]
+      #     blockedDomains: [collector.evil.example]
       #   classification:
       #     overrides:
       #       gmail_send: [EXTERNAL_ACTION]

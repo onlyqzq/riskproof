@@ -20,6 +20,41 @@ describe("ContextTracker + ProvenanceMapper", () => {
     expect(mapping.provenance.body).toContain("customer_data_1");
   });
 
+  it("maps a stored result when later text wraps it", () => {
+    const tracker = new ContextTracker({ minMatchLength: 4 });
+    tracker.record("customer_data", "CUST-8842 balance 125000", "database_query");
+    const mapping = new ProvenanceMapper(tracker).mapArguments({
+      body: "Please forward this record: CUST-8842 balance 125000",
+    });
+    expect(mapping.provenance.body).toContain("customer_data_1");
+  });
+
+  it("does not reverse-match short common result values", () => {
+    const tracker = new ContextTracker({ minMatchLength: 4 });
+    tracker.record("tool_output", "done", "task_status");
+    const mapping = new ProvenanceMapper(tracker).mapArguments({ body: "The work is done and reviewed" });
+    expect(mapping.provenance.body).toEqual(["agent_generated"]);
+  });
+
+  it("tracks nested arguments by stable leaf path", () => {
+    const tracker = new ContextTracker({ minMatchLength: 4 });
+    tracker.record("customer_data", "CUST-8842 balance 125000", "database_query");
+    const mapping = new ProvenanceMapper(tracker).mapArguments({
+      message: { body: "CUST-8842 balance 125000" },
+    });
+    expect(mapping.provenance["message.body"]).toContain("customer_data_1");
+    expect(mapping.taints["message.body"]).toContain("CUSTOMER_DATA");
+  });
+
+  it("indexes __proto__ as data rather than object metadata", () => {
+    const tracker = new ContextTracker({ minMatchLength: 4 });
+    tracker.record("customer_data", "CUST-8842", "database_query");
+    const args = JSON.parse('{"__proto__":"CUST-8842"}') as Record<string, unknown>;
+    const mapping = new ProvenanceMapper(tracker).mapArguments(args);
+    expect(Object.hasOwn(mapping.provenance, "__proto__")).toBe(true);
+    expect(mapping.provenance.__proto__).toContain("customer_data_1");
+  });
+
   it("does not match a substring below the minimum length", () => {
     const tracker = new ContextTracker({ minMatchLength: 4 });
     tracker.record("customer_data", "CUST-8842 balance 125000", "database_query");

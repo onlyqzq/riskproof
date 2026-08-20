@@ -11,6 +11,7 @@
 
 import type { SecurityCapability, TaintLabel } from "./types.js";
 import { SENSITIVE_TAINTS } from "./types.js";
+import { argumentLeaves } from "./arguments.js";
 
 /** Context entry kind (how a tool result was classified for tracking). */
 export type ContextKind =
@@ -97,7 +98,18 @@ export function inferTaintsFromSource(sourceId: string): TaintLabel[] {
 // ── Value-based detection ────────────────────────────────────────────────────
 
 const SENSITIVE_PATTERNS: Array<{ label: TaintLabel; patterns: RegExp[] }> = [
-  { label: "API_KEY", patterns: [/sk-[a-zA-Z0-9_-]{20,}/i, /Bearer\s+[a-zA-Z0-9._\-]{20,}/i] },
+  {
+    label: "API_KEY",
+    patterns: [
+      /(?<![a-zA-Z0-9_-])sk-[a-zA-Z0-9_-]{20,}/i,
+      /Bearer\s+[a-zA-Z0-9._~+/=-]{16,}/i,
+      /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
+      /\bgh[pousr]_[a-zA-Z0-9]{20,}\b/,
+      /\bgithub_pat_[a-zA-Z0-9_]{20,}\b/,
+      /\bxox[baprs]-[a-zA-Z0-9-]{10,}\b/,
+      /\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{6,}\b/,
+    ],
+  },
   {
     label: "SECRET",
     patterns: [
@@ -105,6 +117,8 @@ const SENSITIVE_PATTERNS: Array<{ label: TaintLabel; patterns: RegExp[] }> = [
       /\bsecret["']?\s*[=:]\s*["']?[^\s"',}\]]+/i,
       /\btoken["']?\s*[=:]\s*["']?[^\s"',}\]]+/i,
       /\bpassword["']?\s*[=:]\s*["']?[^\s"',}\]]+/i,
+      /-----BEGIN (?:[A-Z0-9 ]*?)PRIVATE KEY-----/,
+      /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`/@]+:[^\s'"`@]{4,}@[^\s'"`]+/i,
     ],
   },
   {
@@ -180,14 +194,16 @@ export function enrichArgumentTaints(
   provenance: Record<string, string[]>,
   baseTaints: Record<string, TaintLabel[]>,
 ): Record<string, TaintLabel[]> {
-  const result: Record<string, TaintLabel[]> = {};
-  for (const name of Object.keys(args)) {
-    const taints = new Set<TaintLabel>(baseTaints[name] ?? []);
-    for (const source of provenance[name] ?? []) {
+  const result: Record<string, TaintLabel[]> = Object.create(null) as Record<string, TaintLabel[]>;
+  for (const leaf of argumentLeaves(args)) {
+    const base = Object.hasOwn(baseTaints, leaf.path) ? baseTaints[leaf.path] : [];
+    const sources = Object.hasOwn(provenance, leaf.path) ? provenance[leaf.path] : [];
+    const taints = new Set<TaintLabel>(base);
+    for (const source of sources) {
       for (const taint of inferTaintsFromSource(source)) taints.add(taint);
     }
-    for (const taint of detectValueTaints(args[name])) taints.add(taint);
-    result[name] = [...taints];
+    for (const taint of detectValueTaints(leaf.value)) taints.add(taint);
+    result[leaf.path] = [...taints];
   }
   return result;
 }

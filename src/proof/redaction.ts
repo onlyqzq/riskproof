@@ -25,9 +25,11 @@ export function redactProof(proof: SecurityProof): SecurityProof {
   return {
     ...proof,
     reason: redactLogText(proof.reason),
+    remediations: proof.remediations.map(redactLogText),
     matchedRules: proof.matchedRules.map((rule) => ({
       ...rule,
       evidence: rule.evidence.map(redactLogText),
+      remediation: rule.remediation === undefined ? undefined : redactLogText(rule.remediation),
     })),
   };
 }

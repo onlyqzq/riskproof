@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ToolchainGuard } from "../../src/toolchain/guard.js";
 import { RuntimeState } from "../../src/dsh/runtime-state.js";
 import type { RiskProofConfig } from "../../src/config.js";
-import { PROOF_DEFAULTS, PROVENANCE_DEFAULTS, TOOLCHAIN_DEFAULTS } from "../../src/config.js";
+import { POLICY_DEFAULTS, PROOF_DEFAULTS, PROVENANCE_DEFAULTS, TOOLCHAIN_DEFAULTS } from "../../src/config.js";
 
 function config(overrides: Partial<RiskProofConfig> = {}): RiskProofConfig {
   return {
@@ -11,13 +11,7 @@ function config(overrides: Partial<RiskProofConfig> = {}): RiskProofConfig {
     taint: { enabled: true },
     toolchain: { ...TOOLCHAIN_DEFAULTS },
     classification: { overrides: {} },
-    policy: {
-      sensitiveExternalAction: "deny",
-      untrustedPrivateAccess: "ask",
-      untrustedCodeExecution: "deny",
-      unknownTool: "ask",
-      internalDomains: [],
-    },
+    policy: { ...POLICY_DEFAULTS },
     proof: { ...PROOF_DEFAULTS },
     ...overrides,
   };
@@ -39,6 +33,24 @@ describe("ToolchainGuard", () => {
     guard.recordEvent("database_query", ["PRIVATE_ACCESS"], ["customer_data_1"]);
     expect(guard.snapshot().sawPrivateAccess).toBe(true);
     expect(guard.snapshot().sawIngestion).toBe(true);
+    expect(guard.snapshot().sawIngestionThenPrivateAccess).toBe(true);
+  });
+
+  it("does not confuse PAT then EIT with the protected order", () => {
+    const guard = new ToolchainGuard();
+    guard.recordEvent("database_query", ["PRIVATE_ACCESS"]);
+    guard.recordEvent("web_fetch", ["EXTERNAL_INGESTION"]);
+    const state = guard.snapshot();
+    expect(state.sawIngestion).toBe(true);
+    expect(state.sawPrivateAccess).toBe(true);
+    expect(state.sawIngestionThenPrivateAccess).toBe(false);
+    expect(state.path).toEqual(["private_access", "external_ingestion"]);
+  });
+
+  it("requires separate events for an ingestion-to-private transition", () => {
+    const guard = new ToolchainGuard();
+    guard.recordEvent("combined_reader", ["EXTERNAL_INGESTION", "PRIVATE_ACCESS"]);
+    expect(guard.snapshot().sawIngestionThenPrivateAccess).toBe(false);
   });
 
   it("observes the full EIT → PAT → NAT path", () => {

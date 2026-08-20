@@ -14,11 +14,11 @@ export type CapabilityOverrides = Record<string, SecurityCapability[]>;
 
 /** Validate a raw overrides object into normalized capability lists. */
 export function normalizeOverrides(raw: unknown): CapabilityOverrides {
-  if (raw === undefined) return {};
+  if (raw === undefined) return Object.create(null) as CapabilityOverrides;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new TypeError("classification.overrides must be an object mapping tool names to capability lists");
   }
-  const result: CapabilityOverrides = {};
+  const result = Object.create(null) as CapabilityOverrides;
   for (const [toolName, value] of Object.entries(raw as Record<string, unknown>)) {
     if (toolName.length === 0 || toolName.length > 256) {
       throw new TypeError("classification.overrides tool names must be 1-256 characters");

@@ -33,7 +33,9 @@ All configurable via [configuration.md](configuration.md).
 
 ## ProvenanceMapper
 
-For each argument, the mapper finds the tracked entries whose searchable text contains the argument (exact match for sub-`minMatchLength` values, substring otherwise). Matched entry ids become the argument's provenance; matched entry taints become the argument's initial taints. Unmatched arguments are labeled `agent_generated`.
+For each scalar leaf, the mapper finds tracked entries that contain the argument, or a sufficiently long tracked result contained by a later wrapper string. Exact matching still supports short identifiers; reverse matching requires at least 12 characters to avoid common values such as `done` causing false provenance. Matched entry ids become the leaf's provenance; matched entry taints become its initial taints. Unmatched leaves are labeled `agent_generated`.
+
+Nested objects and arrays are flattened into collision-resistant paths such as `message.body` and `recipients[0]`. The same paths are used by provenance, taint, policy evidence, and proofs, so a sensitive value cannot evade analysis merely by moving below the root schema level.
 
 ## Taint inference
 

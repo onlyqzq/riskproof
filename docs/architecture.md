@@ -20,6 +20,8 @@ RiskProof is a single Cordis plugin (`dsh-riskproof`) layered over the DSH Tool 
               │  provenance     │
               │  taint          │
               │  toolchain      │
+              │  path/command   │
+              │  destination    │
               │  engine         │
               └────────┬────────┘
                        │
@@ -53,8 +55,11 @@ RiskProof is a single Cordis plugin (`dsh-riskproof`) layered over the DSH Tool 
 | `src/dsh/decisions.ts` | Decision mapping (`require_approval` ↔ `ask`) and monotonic merge. |
 | `src/dsh/runtime-state.ts` | Per-session state isolation. |
 | `src/core/engine.ts` | Pure deterministic policy evaluation. No DSH imports. |
+| `src/core/arguments.ts` | Bounded nested-argument traversal and stable leaf paths. |
 | `src/core/taint.ts` | Source inference + value-based taint detection. |
 | `src/core/destination.ts` | External destination / cloud-metadata detection. |
+| `src/core/path-policy.ts` | Sensitive credential-path detection with bounded operator globs. |
+| `src/core/command-risk.ts` | Bounded high-confidence destructive/network command checks. |
 | `src/classification/` | Capability vocabulary, classifier, overrides. |
 | `src/provenance/` | Bounded ContextTracker + ProvenanceMapper. |
 | `src/toolchain/guard.ts` | Cross-tool EIT/PAT/NAT state. |
@@ -63,21 +68,22 @@ RiskProof is a single Cordis plugin (`dsh-riskproof`) layered over the DSH Tool 
 ## Data flow (pre-execute)
 
 1. `tools/pre-execute` receives the `ToolExecution`.
-2. The adapter classifies the tool (`name` + description + input schema, with config overrides).
-3. The per-session `ProvenanceMapper` maps arguments back to tracked results, yielding provenance ids and taints.
+2. The adapter classifies the effective scoped tool (`name` + description + input schema, with config overrides). Same-name definitions are cached separately per agent scope.
+3. The per-session `ProvenanceMapper` maps nested argument leaves back to tracked results, yielding provenance ids and taints.
 4. Taints are enriched additively (source inference + value detection).
 5. The toolchain guard contributes the observed EIT/PAT/NAT state.
-6. The pure engine evaluates the rules and returns a `SecurityDecision`.
-7. The decision maps to `allow` / `ask` / `deny` and merges monotonically with downstream plugins.
-8. A privacy-preserving proof is recorded.
+6. Destination, sensitive-path, and command-risk detectors add deterministic local evidence.
+7. The pure engine evaluates hard invariants and preset-resolved policy rules, then returns a `SecurityDecision` with remediation guidance.
+8. The decision maps to `allow` / `ask` / `deny` and merges monotonically with downstream plugins.
+9. A privacy-preserving proof is recorded, including rule ids and remediation but no raw path, command, arguments, or results.
 
 ## Data flow (result)
 
 On a successful result only:
 
 1. The adapter infers a context kind from the tool + capabilities.
-2. The result value is recorded in the per-session `ContextTracker` (bounded, metadata + searchable text only).
-3. The toolchain guard records the completed event with the produced context ids.
+2. When searchable content exists, the result value is recorded in the per-session `ContextTracker` (bounded, metadata + searchable text only).
+3. The toolchain guard always records the successful capability event, with any produced context ids. Empty or unindexable results therefore preserve execution order without claiming data provenance.
 
 Failures never record "data obtained".
 

@@ -25,9 +25,15 @@ A single stage is usually safe; the composition is not:
 - **Case B** — `EIT → PAT → NAT` without confirmed sensitive data in the outbound args → **ask**.
 - **Case C** — `EIT → PAT → NAT` with `CUSTOMER_DATA` / `PII` / `SECRET` (or private provenance) actually in the outbound args → **deny**.
 
+Additional v0.2 transitions reuse the same bounded session history:
+
+- `EXTERNAL_INGESTION → CREDENTIAL_ACCESS` → `deny` under `balanced`.
+- untrusted provenance entering `LOCAL_MUTATION` → `ask` under `balanced`.
+- credentials entering a network-capable `CODE_EXECUTION` command → hard `deny`.
+
 ## Classification
 
-The classifier is deterministic, using tool name, description, and input schema. A tool can carry several capabilities; general-purpose shells map to `CODE_EXECUTION` (and can implement every phase). Unknown tools classify to an empty set and take the configured `unknownTool` posture (default `ask`, fail closed).
+The classifier is deterministic, using tool name, description, and input schema. English and common Chinese security vocabulary are recognized. A tool can carry several capabilities; general-purpose shells map to `CODE_EXECUTION` (and can implement every phase). Unknown tools classify to an empty set and take the configured `unknownTool` posture (default `ask`, fail closed).
 
 Explicit `classification.overrides` win over heuristics:
 
@@ -40,7 +46,7 @@ classification:
 
 ## State
 
-The `ToolchainGuard` keeps a bounded, metadata-only history of successful calls (tool label + capabilities + context ids). It never stores raw results. State is per-session, so one session's flow never contaminates another's.
+The `ToolchainGuard` keeps a bounded, metadata-only history of successful calls (tool label + capabilities + context ids). It preserves event and capability order: `PAT → EIT` is not treated as `EIT → PAT`, and a single multi-capability event does not manufacture a cross-tool transition. A successful call records its capability event even when its result is empty or cannot be indexed. It never stores raw results. State is per-session, so one session's flow never contaminates another's.
 
 ## Code Mode
 
